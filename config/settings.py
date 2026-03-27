@@ -11,9 +11,10 @@ SITES = [
     {
         "provider": "Myntra",
         "urls": [
-            "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=3&tab=all&userType=all",
-            "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=2&tab=all&userType=all",
-            "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=1&tab=all&userType=all"
+            # "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=1&tab=all&userType=all",
+            # "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=2&tab=all&userType=all",
+            # "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=3&tab=all&userType=all",
+            "https://www.grabon.in/myntra-coupons/"
         ]
     },
 

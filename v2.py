@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_KEY  = os.getenv("FIRECRAWL_API_KEY")
-TEST_URL = "https://www.coupondunia.in/myntra"
+TEST_URL = "https://www.grabon.in/myntra-coupons/"
 
 firecrawl = Firecrawl(api_key=API_KEY)
 
