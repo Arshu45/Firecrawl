@@ -4,29 +4,36 @@ from datetime import datetime
 
 load_dotenv()
 
+# ── API Keys ───────────────────────────────────────────
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
+GROQ_API_KEY      = os.getenv("GROQ_API_KEY",      "")
 
-# ✅ Batch-based config
+# ── Model ──────────────────────────────────────────────
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+# ── Sites to scrape ─────────────────────────────────────
 SITES = [
     {
         "provider": "Myntra",
         "urls": [
-            # "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=1&tab=all&userType=all",
-            # "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=2&tab=all&userType=all",
-            # "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=3&tab=all&userType=all",
             "https://www.grabon.in/myntra-coupons/"
         ]
     },
+    {
+        "provider": "Nykaa",
+        "urls": [
+            "https://www.grabon.in/nykaa-coupons/"
+        ]
+    }
 
-    # Example future batch
+    # Add more providers here:
     # {
     #     "provider": "Ajio",
     #     "urls": [
-    #         "https://...",
-    #         "https://..."
+    #         "https://www.grabon.in/ajio-coupons/",
     #     ]
-    # }
+    # },
 ]
 
-OUTPUT_DIR  = "output"
-OUTPUT_FILE = f"promotions_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+# ── Output ─────────────────────────────────────────────
+OUTPUT_DIR = "output"
