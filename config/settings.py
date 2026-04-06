@@ -16,16 +16,13 @@ SITES = [
     {
         "provider": "Myntra",
         "urls": [
-            "https://www.coupondunia.in/myntra?subcategories=&banks=&sortBy=popularity&noOfPages=1&tab=all&userType=all",
             "https://www.grabon.in/myntra-coupons/"
         ]
     },
     {
         "provider": "Nykaa",
         "urls": [
-            "https://www.coupondunia.in/nykaa?subcategories=&banks=&sortBy=popularity&noOfPages=1&tab=all&userType=all",
             "https://www.grabon.in/nykaa-coupons/"
-
         ]
     }
 

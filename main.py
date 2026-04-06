@@ -76,9 +76,6 @@ def run_extract_only(raw_file: str):
     if not raw_offers:
         print("❌ No offers extracted."); return
 
-    raw_path = _save(raw_offers, f"promotions_raw_{_timestamp()}.json")
-    print(f"\n📄 Raw per-URL offers saved → {raw_path}")
-
     # ── Step 3: Deduplicate (merge by provider) ────────
     merged = merge_by_provider(raw_offers)
     out_path = _save(merged, f"promotions_{_timestamp()}.json")
@@ -104,9 +101,6 @@ def run_full():
     raw_offers = extract_all_pages(pages, GROQ_API_KEY, GROQ_MODEL)
     if not raw_offers:
         print("❌ No offers extracted."); return
-
-    raw_path = _save(raw_offers, f"promotions_raw_{_timestamp()}.json")
-    print(f"\n📄 Raw per-URL offers saved → {raw_path}")
 
     # ── Step 3: Deduplicate (merge by provider) ────────
     merged   = merge_by_provider(raw_offers)
