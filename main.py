@@ -1,140 +1,190 @@
-import json
-import os
+"""
+Master Orchestrator
+CLI entry point — run the full promo intelligence pipeline.
+
+Usage:
+  python main.py                          # run all providers
+  python main.py --providers Myntra Ajio  # specific providers
+  python main.py --providers Myntra --skip-db  # dry run (no DB write)
+  python main.py --fetch-only             # only fetch markdown
+  python main.py --extract-only output/raw_markdown_*.json
+"""
+
 import argparse
-from datetime import datetime
+import json
+import logging
+import os
+import sys
 
-from config.settings               import FIRECRAWL_API_KEY, GROQ_API_KEY, GROQ_MODEL, SITES, OUTPUT_DIR
-from fetcher.firecrawl_fetcher     import fetch_all_sites
-from extractor.groq_extractor      import extract_all_pages
-from deduplicator.deduplicator     import merge_by_provider
+logging.basicConfig(
+    level  = logging.INFO,
+    format = "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-
-# -------------------------------------------------------
-# Helpers
-# -------------------------------------------------------
-
-def _timestamp() -> str:
-    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-
-def _save(data: list, filename: str) -> str:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(OUTPUT_DIR, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    return path
+from config.settings import (
+    FIRECRAWL_API_KEY, GROQ_API_KEY, DATABASE_URL,
+    COMPETITOR_SITES, OUTPUT_DIR,
+)
 
 
-def _validate_keys():
+# ── Validation ─────────────────────────────────────────────────────────────
+
+def _validate_keys(skip_db: bool = False):
     errors = []
-    if not FIRECRAWL_API_KEY or FIRECRAWL_API_KEY == "your_firecrawl_api_key_here":
-        errors.append("FIRECRAWL_API_KEY not set in .env")
-    if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
-        errors.append("GROQ_API_KEY not set in .env")
-    if errors:
-        print("\n❌ Missing API keys:")
-        for e in errors:
-            print(f"   - {e}")
-        return False
-    return True
-
-
-# -------------------------------------------------------
-# Run modes
-# -------------------------------------------------------
-
-def run_fetch_only():
-    """Step 1 only — scrape Markdown, save raw output."""
     if not FIRECRAWL_API_KEY:
-        print("❌ FIRECRAWL_API_KEY not set"); return
-
-    pages = fetch_all_sites(SITES, FIRECRAWL_API_KEY)
-    if not pages:
-        print("❌ No pages fetched."); return
-
-    filename = f"raw_markdown_{_timestamp()}.json"
-    path     = _save(pages, filename)
-    print(f"✅ Raw Markdown saved → {path}")
-    print(f"   ({len(pages)} pages)")
-
-
-def run_extract_only(raw_file: str):
-    """Step 2+3 only — load existing raw Markdown file, run Groq extraction + dedup."""
+        errors.append("FIRECRAWL_API_KEY not set in .env")
     if not GROQ_API_KEY:
-        print("❌ GROQ_API_KEY not set"); return
+        errors.append("GROQ_API_KEY not set in .env")
+    if not skip_db and not DATABASE_URL:
+        errors.append("DATABASE_URL not set in .env  (use --skip-db to bypass)")
+    if errors:
+        print("\n❌ Missing configuration:")
+        for e in errors:
+            print(f"   • {e}")
+        sys.exit(1)
 
+
+# ── Run modes ──────────────────────────────────────────────────────────────
+
+def run_fetch_only(providers: list[str]):
+    """Step 0 only — fetch markdown and save."""
+    from ingestion.firecrawl_fetcher import fetch_all
+    pages = fetch_all(providers)
+    if not pages:
+        logger.error("No pages fetched.")
+        return {}
+    logger.info(f"Fetch complete — {len(pages)} pages")
+    return {"pages_fetched": len(pages)}
+
+
+def run_pipeline(providers: list[str], skip_db: bool = False) -> dict:
+    """Full pipeline: fetch → extract → process → (load)."""
+    from ingestion.firecrawl_fetcher import fetch_all
+    from extraction.groq_extractor   import extract_all
+    from processing.post_processor   import process_all
+
+    results = {}
+
+    # ── Step 0: Fetch ──────────────────────────────────
+    logger.info(f"Step 0: Fetching {len(providers)} provider(s)")
+    pages = fetch_all(providers)
+    if not pages:
+        logger.error("No pages fetched — aborting.")
+        return {"error": "No pages fetched"}
+
+    # ── Step 1: Extract ────────────────────────────────
+    logger.info("Step 1: Extracting offers with Groq")
+    raw_results = extract_all(pages)
+    if not raw_results:
+        logger.error("No offers extracted — aborting.")
+        return {"error": "No offers extracted"}
+
+    # ── Step 2: Process ────────────────────────────────
+    logger.info("Step 2: Processing (validate, normalise, dedup)")
+    clean_results = process_all(raw_results)
+
+    # ── Step 3: Load to DB ─────────────────────────────
+    if not skip_db:
+        logger.info("Step 3: Loading to PostgreSQL")
+        from database.loader import load_all
+        db_summary = load_all(clean_results)
+    else:
+        db_summary = {"inserted": 0, "skipped": 0, "note": "DB skipped (--skip-db)"}
+        logger.info("Step 3: Skipped (--skip-db)")
+
+    # ── Summary ────────────────────────────────────────
+    for r in clean_results:
+        results[r["provider"]] = {
+            "total_raw"  : r["total_raw"],
+            "total_clean": r["total_clean"],
+            "dropped"    : r["dropped"],
+        }
+    results["_db"] = db_summary
+
+    return results
+
+
+def run_extract_only(raw_file: str, skip_db: bool = False) -> dict:
+    """Load saved raw markdown JSON and run extraction + processing + load."""
     if not os.path.exists(raw_file):
-        print(f"❌ File not found: {raw_file}"); return
+        logger.error(f"File not found: {raw_file}")
+        return {"error": "File not found"}
 
     with open(raw_file, encoding="utf-8") as f:
         pages = json.load(f)
 
-    print(f"📂 Loaded {len(pages)} pages from {raw_file}")
+    if isinstance(pages, dict):
+        pages = [pages]   # single-page file
 
-    # ── Step 2: Extract (per URL) ──────────────────────
-    raw_offers = extract_all_pages(pages, GROQ_API_KEY, GROQ_MODEL)
-    if not raw_offers:
-        print("❌ No offers extracted."); return
+    from extraction.groq_extractor import extract_all
+    from processing.post_processor import process_all
 
-    # ── Step 3: Deduplicate (merge by provider) ────────
-    merged = merge_by_provider(raw_offers)
-    out_path = _save(merged, f"promotions_{_timestamp()}.json")
-    print(f"✅ Deduplicated offers saved → {out_path}")
-    total = sum(p["total_offers"] for p in merged)
-    print(f"   {len(merged)} provider(s) | {total} unique offers")
+    raw_results   = extract_all(pages)
+    clean_results = process_all(raw_results)
 
+    if not skip_db:
+        from database.loader import load_all
+        db_summary = load_all(clean_results)
+    else:
+        db_summary = {"inserted": 0, "skipped": 0, "note": "DB skipped"}
 
-def run_full():
-    """Step 1 + Step 2 + Step 3 — scrape, extract, deduplicate."""
-    if not _validate_keys():
-        return
-
-    # ── Step 1: Fetch ──────────────────────────────────
-    pages = fetch_all_sites(SITES, FIRECRAWL_API_KEY)
-    if not pages:
-        print("❌ No pages fetched. Check API key and URLs."); return
-
-    raw_md_path = _save(pages, f"raw_markdown_{_timestamp()}.json")
-    print(f"\n📄 Raw Markdown saved → {raw_md_path}")
-
-    # ── Step 2: Extract (per URL) ──────────────────────
-    raw_offers = extract_all_pages(pages, GROQ_API_KEY, GROQ_MODEL)
-    if not raw_offers:
-        print("❌ No offers extracted."); return
-
-    # ── Step 3: Deduplicate (merge by provider) ────────
-    merged   = merge_by_provider(raw_offers)
-    out_path = _save(merged, f"promotions_{_timestamp()}.json")
-    total    = sum(p["total_offers"] for p in merged)
-    print(f"\n🎉 Done! Deduplicated offers saved → {out_path}")
-    print(f"   {len(merged)} provider(s) | {total} unique offers")
+    results: dict = {}
+    for r in clean_results:
+        results[r["provider"]] = {
+            "total_raw"  : r["total_raw"],
+            "total_clean": r["total_clean"],
+            "dropped"    : r["dropped"],
+        }
+    results["_db"] = db_summary
+    return results
 
 
-# -------------------------------------------------------
-# Entry point
-# -------------------------------------------------------
+# ── Entry point ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Retail Promotion Intelligence Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
 
-    parser = argparse.ArgumentParser(description="Promo Pipeline")
-    group  = parser.add_mutually_exclusive_group()
-
-    group.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--fetch-only",
         action="store_true",
-        help="Only run Step 1 (scrape Markdown). Saves raw_markdown_*.json"
+        help="Only fetch markdown — no extraction, no DB",
     )
-    group.add_argument(
+    mode.add_argument(
         "--extract-only",
         metavar="RAW_FILE",
-        help="Only run Step 2 (Groq extraction) on an existing raw_markdown_*.json file"
+        help="Run extraction on an existing raw_markdown_*.json file",
+    )
+
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        default=list(COMPETITOR_SITES.keys()),
+        choices=list(COMPETITOR_SITES.keys()),
+        metavar="PROVIDER",
+        help=f"One or more of: {list(COMPETITOR_SITES.keys())}",
+    )
+    parser.add_argument(
+        "--skip-db",
+        action="store_true",
+        help="Skip the database load step (dry run)",
     )
 
     args = parser.parse_args()
 
     if args.fetch_only:
-        run_fetch_only()
+        _validate_keys(skip_db=True)
+        result = run_fetch_only(args.providers)
     elif args.extract_only:
-        run_extract_only(args.extract_only)
+        _validate_keys(skip_db=args.skip_db)
+        result = run_extract_only(args.extract_only, skip_db=args.skip_db)
     else:
-        run_full()
+        _validate_keys(skip_db=args.skip_db)
+        result = run_pipeline(args.providers, skip_db=args.skip_db)
+
+    print("\n" + json.dumps(result, indent=2))
