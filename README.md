@@ -1,115 +1,77 @@
-# Promo Pipeline
+# Promotion Intelligence POC
 
-`promo_pipeline` is a small data pipeline that collects promotional offers from coupon/deal websites and converts them into structured JSON.
+A retail competitor promotion monitoring pipeline. Scrapes coupon/deal websites, extracts structured promotional offers using AI, and produces clean validated JSON — ready for database ingestion and business insights.
 
-It does this in 3 stages:
+> **Current state:** Layers 0–2 implemented (Ingestion → Extraction → Processing). Layer 3+ (Database, Insights, Recommendations, UI) in progress.
 
-1. Fetch coupon pages as Markdown using Firecrawl.
-2. Extract structured offer data from that Markdown using Groq.
-3. Deduplicate overlapping offers across multiple sources for the same provider.
+---
 
-The current configuration is set up for providers like `Myntra` and `Nykaa`, with sources such as `CouponDunia` and `GrabOn`.
+## Architecture
 
-## What This Project Produces
+```
+Layer 8 — AI Chatbot               (planned)
+Layer 7 — Streamlit Dashboard      (planned)
+Layer 5 — Recommendation Engine    (planned)
+Layer 4 — Insights Engine          (planned)
+Layer 3 — PostgreSQL Database      (planned)
+Layer 2 — Processing               ✅ processing/post_processor.py
+Layer 1 — AI Extraction            ✅ extraction/groq_extractor.py
+Layer 0 — Ingestion                ✅ ingestion/firecrawl_fetcher.py
+```
 
-The pipeline generates JSON outputs in the `output/` folder:
-
-- `raw_markdown_*.json`
-  Raw Markdown scraped from each configured URL.
-- `promotions_*.json`
-  Final deduplicated structured promotions grouped by provider.
+---
 
 ## Project Structure
 
-```text
-promo_pipeline/
-├── config/
-│   └── settings.py
-├── fetcher/
-│   └── firecrawl_fetcher.py
-├── extractor/
-│   └── groq_extractor.py
-├── deduplicator/
-│   └── deduplicator.py
-├── output/
-├── tests/
-├── main.py
+```
+AI_Promotional_POC/
+├── main.py                          # Master orchestrator + CLI
 ├── requirements.txt
-└── .env
+├── .env                             # API keys (not committed)
+│
+├── config/
+│   └── settings.py                  # COMPETITOR_SITES, CATEGORY_MAP, VALID_*, all constants
+│
+├── ingestion/
+│   └── firecrawl_fetcher.py         # Layer 0: URL → clean Markdown (Firecrawl)
+│
+├── extraction/
+│   ├── prompt_templates.py          # All LLM prompts in one place
+│   └── groq_extractor.py            # Layer 1: Markdown → validated Offer objects (Groq)
+│
+├── processing/
+│   └── post_processor.py            # Layer 2: validate, normalise, deduplicate
+│
+├── output/                          # Timestamped JSON outputs (gitignored)
+└── tests/
 ```
 
-## How It Works
+---
 
-### 1. Configuration
+## Tech Stack
 
-[`config/settings.py`](./config/settings.py) loads:
+| Layer | Tool |
+|-------|------|
+| Scraping | `firecrawl-py` |
+| AI / LLM | `groq` — LLaMA 3.3 70B |
+| Validation | `pydantic` |
+| Deduplication | `rapidfuzz` |
+| Retries | `tenacity` |
+| Config | `python-dotenv` |
+| DB (Layer 3+) | `psycopg2-binary` + PostgreSQL |
+| UI (Layer 7+) | `streamlit` |
 
-- `FIRECRAWL_API_KEY`
-- `GROQ_API_KEY`
-- the Groq model name
-- the list of providers and source URLs
-- the output directory
+---
 
-### 2. Fetching
+## Environment Setup
 
-[`fetcher/firecrawl_fetcher.py`](./fetcher/firecrawl_fetcher.py) uses Firecrawl to:
+Create a `.env` file in the project root:
 
-- scrape each source URL as Markdown
-- scroll the page so lazy-loaded coupon cards appear
-- remove common noise such as headers, footers, sidebars, popups, and ads
-
-Output shape:
-
-```json
-{
-  "url": "https://example.com/page",
-  "provider": "Myntra",
-  "scraped_date": "2026-04-03",
-  "markdown": "..."
-}
+```env
+FIRECRAWL_API_KEY=your_firecrawl_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
+DATABASE_URL=postgresql://user:password@localhost:5432/promo_db  # needed from Layer 3 onwards
 ```
-
-### 3. Extraction
-
-[`extractor/groq_extractor.py`](./extractor/groq_extractor.py) sends the Markdown to Groq and extracts a structured schema for every offer.
-
-It includes fields such as:
-
-- `offer_title`
-- `description`
-- `brand`
-- `category`
-- `promo_type`
-- `discount_min`
-- `discount_max`
-- `flat_value`
-- `min_purchase`
-- `coupon_code`
-- `user_type`
-
-### 4. Deduplication
-
-[`deduplicator/deduplicator.py`](./deduplicator/deduplicator.py) merges duplicate offers across multiple sources for the same provider.
-
-Deduplication logic is based on:
-
-- `coupon_code` first
-- normalized `offer_title` as fallback
-
-The final output is grouped by provider and includes:
-
-- `provider`
-- `scraped_date`
-- `source_urls`
-- `total_sources`
-- `total_offers`
-- `offers`
-
-## Requirements
-
-- Python 3
-- A Firecrawl API key
-- A Groq API key
 
 Install dependencies:
 
@@ -117,64 +79,108 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-## Environment Setup
+---
 
-Create a `.env` file inside `promo_pipeline/`:
+## How to Run (Layers 0–2)
 
-```env
-FIRECRAWL_API_KEY=your_firecrawl_api_key_here
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-## How To Run
-
-Run all commands from inside the `promo_pipeline` folder.
-
-### Full Pipeline
-
-This runs fetch + extract + deduplicate.
-
+### Full pipeline — all providers
 ```bash
-python main.py
+python main.py --skip-db
 ```
 
-### Fetch Only
-
-This only scrapes Markdown and saves `raw_markdown_*.json`.
-
+### Specific providers only
 ```bash
-python main.py --fetch-only
+python main.py --providers Myntra Nykaa --skip-db
 ```
 
-### Extract Only
-
-This loads an existing `raw_markdown_*.json` file and produces the final `promotions_*.json`.
-
+### Re-run AI extraction on already-scraped data
+Saves Firecrawl API credits — reuses a saved `raw_markdown_*.json` file:
 ```bash
-python main.py --extract-only output/raw_markdown_2026-03-30_15-54-28.json
+python main.py --extract-only output/raw_markdown_Myntra_2026-04-07_14-20-00.json
 ```
 
-## Example Flow
+> Remove `--skip-db` once Layer 3 (database) is built.
 
-1. Configure provider URLs in [`config/settings.py`](./config/settings.py).
-2. Add API keys in `.env`.
-3. Run:
+---
 
-```bash
-python main.py
+## Output Files
+
+Each pipeline run produces timestamped files in `output/`:
+
+| File | Contents |
+|------|----------|
+| `raw_markdown_{Provider}_{ts}.json` | Raw Markdown scraped from Firecrawl |
+| `promotions_raw_{Provider}_{ts}.json` | Offers extracted by Groq (pre-cleanup) |
+| `promotions_clean_{Provider}_{ts}.json` | Final validated + deduplicated offers |
+
+---
+
+## How It Works — Layer by Layer
+
+### Layer 0 — Ingestion (`ingestion/firecrawl_fetcher.py`)
+
+- Scrapes each configured URL using the Firecrawl SDK
+- Scrolls the page 12× (2s each) to trigger lazy-loaded coupon cards
+- Strips noise: nav, footer, ads, popups, sidebars
+- Wraps in `tenacity` retry — 3 attempts, 5s wait
+- Auto-saves `output/raw_markdown_{Provider}_{ts}.json`
+
+Output shape per page:
+```json
+{
+  "provider"    : "Myntra",
+  "url"         : "https://www.grabon.in/myntra-coupons/",
+  "scraped_at"  : "2026-04-07T14:20:00",
+  "scraped_date": "2026-04-07",
+  "markdown"    : "...",
+  "char_count"  : 42300
+}
 ```
 
-4. Check the generated files in `output/`.
+### Layer 1 — AI Extraction (`extraction/groq_extractor.py`)
 
-## Notes
+- Splits Markdown into **3,000-char chunks with 200-char overlap** (prevents cutting mid-offer)
+- Sends each chunk to Groq LLM (`llama-3.3-70b-versatile`, temperature=0)
+- Validates every extracted offer with a **Pydantic `Offer` model** — drops invalid records
+- Wraps each Groq call in `tenacity` — 3 retries with exponential backoff
+- All prompts live in `extraction/prompt_templates.py` (never inlined)
 
-- Source URLs are currently hardcoded in `config/settings.py`.
-- The pipeline is modular, so fetch, extract, and dedup logic are separated cleanly.
-- `tests/test_fetcher.py` currently exists but is empty, so automated test coverage is still minimal.
+Offer schema:
+```
+offer_title, description, brand, category, promo_type,
+discount_min, discount_max, flat_value, min_purchase,
+coupon_code, user_type, valid_until
+```
 
-## Demo Summary
+### Layer 2 — Processing (`processing/post_processor.py`)
 
-If you need a one-line explanation for a demo:
+Three sequential steps:
 
-“This project scrapes coupon pages with Firecrawl, extracts structured promotions using Groq, and merges duplicate offers across multiple sources into a clean provider-level JSON output.”
+1. **Field Validation** — drops offers missing `offer_title`, drops hallucinated discounts (>100%), swaps `discount_min`/`discount_max` if inverted, applies defaults for `user_type` and `promo_type`
+2. **Category Normalisation** — maps synonyms to canonical names using `CATEGORY_MAP` (e.g. `"sportswear"` → `"Sports"`, `"cosmetics"` → `"Beauty"`)
+3. **Fuzzy Deduplication** — uses `rapidfuzz` with 85% title similarity threshold + same `discount_min` to identify duplicates; merges richer fields; tracks `source_count`
 
+---
+
+## Configured Providers
+
+Edit `config/settings.py` to add or change providers:
+
+```python
+COMPETITOR_SITES = {
+    "Myntra"  : "https://www.grabon.in/myntra-coupons/",
+    "Ajio"    : "https://www.grabon.in/ajio-coupons/",
+    "Nykaa"   : "https://www.grabon.in/nykaa-coupons/",
+    "Flipkart": "https://www.grabon.in/flipkart-coupons/",
+}
+```
+
+---
+
+## Design Principles
+
+- **No LangChain, no vector DB, no RAG** — simple, auditable Python only
+- **Deterministic business logic** — LLM only touches extraction and narration
+- **Idempotent pipeline** — running twice for the same date will not produce duplicates (enforced at DB layer)
+- **All prompts centralised** in `extraction/prompt_templates.py`
+- **Pydantic validation** before any data touches the database
