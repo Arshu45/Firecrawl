@@ -9,3 +9,7 @@ pandas
 streamlit
 httpx
 pymysql
+langchain
+langchain-groq
+fastapi
+uvicorn
