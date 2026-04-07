@@ -7,6 +7,7 @@ Usage:
     python main.py --providers Myntra --skip-db  # Skip DB load (Layers 0-2 only)
     python main.py --extract-only output/raw_markdown_Myntra_*.json  # Re-run Layer 1-3
     python main.py --load-only output/promotions_clean_Myntra_*.json # Re-run Layer 3 only
+    python main.py --sync-internal                   # Fetch & Load MySQL Store Data
 """
 
 import json
@@ -206,6 +207,28 @@ def run_load_only(clean_file: str):
     except Exception as e:
         print(f"  ❌ DB load failed: {e}")
 
+def run_sync_internal():
+    """Runs the internal MySQL -> Postgres connector pipeline."""
+    from connectors.mysql_fetcher import fetch_internal_promotions
+    from connectors.transformer import transform_internal_data
+    from database.loader import load_internal_promotions
+
+    print("\n🚀 Syncing Internal Store Data (MySQL -> Postgres)...")
+    
+    try:
+        raw_rows = fetch_internal_promotions()
+        if not raw_rows:
+            print("  ⚠️  No active internal promotions fetched.")
+            return
+
+        transformed = transform_internal_data(raw_rows)
+        print(f"  ✅ Transformed {len(transformed)} promotions to unified schema.")
+
+        result = load_internal_promotions(transformed)
+        print(f"\n🎉 Internal Sync Complete: {result['upserted']} records successfully upserted.")
+
+    except Exception as e:
+        print(f"\n❌ Internal Sync Failed: {e}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -238,10 +261,17 @@ if __name__ == "__main__":
         metavar = "CLEAN_FILE",
         help    = "Run database load on an existing promotions_clean_*.json file"
     )
+    parser.add_argument(
+        "--sync-internal",
+        action  = "store_true",
+        help    = "Extract from internal MySQL, transform, and load into Postgres (Internal Connector)"
+    )
 
     args = parser.parse_args()
 
-    if args.load_only:
+    if args.sync_internal:
+        run_sync_internal()
+    elif args.load_only:
         run_load_only(args.load_only)
     elif args.extract_only:
         run_extract_only(args.extract_only, skip_db=args.skip_db)

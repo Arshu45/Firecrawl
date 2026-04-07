@@ -13,10 +13,13 @@ Layer 8 — AI Chatbot               (planned)
 Layer 7 — Streamlit Dashboard      (planned)
 Layer 5 — Recommendation Engine    (planned)
 Layer 4 — Insights Engine          (planned)
+
 Layer 3 — PostgreSQL Database      ✅ database/loader.py
 Layer 2 — Processing               ✅ processing/post_processor.py
 Layer 1 — AI Extraction            ✅ extraction/groq_extractor.py
 Layer 0 — Ingestion                ✅ ingestion/firecrawl_fetcher.py
+
+Internal MySQL Connector           ✅ connectors/mysql_fetcher.py & transformer.py
 ```
 
 ---
@@ -41,6 +44,10 @@ AI_Promotional_POC/
 │
 ├── processing/
 │   └── post_processor.py            # Layer 2: validate, normalise, deduplicate
+│
+├── connectors/                      # Internal Connector Pipeline
+│   ├── mysql_fetcher.py             # Fetch from MySQL Store Database
+│   └── transformer.py               # Transform MySQL records to Unified Schema
 │
 ├── database/
 │   ├── db_client.py                 # Layer 3: psycopg2 connection pool
@@ -115,6 +122,12 @@ Bypasses both APIs to load processed data natively into the DB:
 python main.py --load-only output/promotions_clean_Myntra_2026-04-07.json
 ```
 
+### New: Internal Store Connector
+Fetches Internal MySQL data, transforms it via `config/internal_mapping.json`, and loads it into PostgreSQL:
+```bash
+python main.py --sync-internal
+```
+
 ---
 
 ## Output Files
@@ -178,7 +191,13 @@ Three sequential steps:
 
 - Thin `psycopg2` client wrapper using `SimpleConnectionPool` and `RealDictCursor`
 - **Fully idempotent**: Uses `ON CONFLICT DO NOTHING` for competitors and checks `(offer_title, competitor_id, scraped_date)` to avoid duplicates
-- Separates `promotions` tracking from `internal_pricing` mapping for margins
+
+### Internal Data Connector (`connectors/`)
+
+- Designed to safely unify internal MySQL store architecture with competitor web-scraped data
+- `mysql_fetcher.py`: Connects securely to internal legacy MySQL
+- `transformer.py`: Follows the JSON mapping dynamically (config separation over code logic)
+- Upserts directly into a dedicated `internal_promotions` table sharing the **exact** schema definition as `promotions` for 1:1 comparison in Layers 4 & 5
 
 ---
 

@@ -1,0 +1,31 @@
+{
+  "mappings": {
+    "promo_id": "internal_promo_id",
+    "promo_name": "offer_title",
+    "promo_type": "promo_type",
+    "discount_value": "flat_value",
+    "discount_pct": "discount_pct",
+    "min_order_value": "min_purchase",
+    "target_segment": "user_type",
+    "applicable_on": "category_hint",
+    "promo_code": "coupon_code",
+    "end_date": "valid_until"
+  },
+  "value_maps": {
+    "promo_type": {
+      "Percentage": "percentage",
+      "FlatDiscount": "flat",
+      "BOGO": "bogo",
+      "CategoryOffer": "other",
+      "LoyaltyPoints": "other",
+      "FreeShipping": "free_delivery"
+    },
+    "user_type": {
+      "All": "all",
+      "New": "new",
+      "Loyal": "existing",
+      "Premium": "existing",
+      "Inactive": "all"
+    }
+  }
+}

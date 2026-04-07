@@ -187,3 +187,68 @@ def load_all(clean_results: list) -> dict:
         "total_skipped" : total_skipped,
         "by_provider"   : by_provider,
     }
+
+
+# ── Internal Store Data Load ───────────────────────────────────────────────────
+
+def load_internal_promotions(internal_offers: list[dict]) -> dict:
+    """
+    Loads transformed MySQL promotions into the internal_promotions table.
+    Uses internal_promo_id for idempotency (UPSERT/ON CONFLICT DO UPDATE).
+    """
+    inserted = 0
+    updated  = 0
+    skipped  = 0
+
+    print(f"\n  [Internal Sync] Loading {len(internal_offers)} offers into DB...")
+
+    db = DBClient()
+    try:
+        for offer in internal_offers:
+            promo_id = offer.get("internal_promo_id")
+            if not promo_id:
+                logger.warning("Skipping internal offer without internal_promo_id")
+                skipped += 1
+                continue
+
+            # We use an UPSERT (ON CONFLICT) so running sync twice updates any changes.
+            db.execute_write(
+                """
+                INSERT INTO internal_promotions (
+                    internal_promo_id, offer_title, description, brand, category,
+                    promo_type, discount_min, discount_max, flat_value,
+                    min_purchase, coupon_code, user_type, valid_until,
+                    source_count, source_url, scraped_date
+                ) VALUES (
+                    %(internal_promo_id)s, %(offer_title)s, %(description)s, %(brand)s, %(category)s,
+                    %(promo_type)s, %(discount_min)s, %(discount_max)s, %(flat_value)s,
+                    %(min_purchase)s, %(coupon_code)s, %(user_type)s, %(valid_until)s,
+                    %(source_count)s, %(source_url)s, %(scraped_date)s
+                )
+                ON CONFLICT (internal_promo_id) DO UPDATE SET
+                    offer_title  = EXCLUDED.offer_title,
+                    description  = EXCLUDED.description,
+                    brand        = EXCLUDED.brand,
+                    category     = EXCLUDED.category,
+                    promo_type   = EXCLUDED.promo_type,
+                    discount_min = EXCLUDED.discount_min,
+                    discount_max = EXCLUDED.discount_max,
+                    flat_value   = EXCLUDED.flat_value,
+                    min_purchase = EXCLUDED.min_purchase,
+                    coupon_code  = EXCLUDED.coupon_code,
+                    user_type    = EXCLUDED.user_type,
+                    valid_until  = EXCLUDED.valid_until,
+                    scraped_date = EXCLUDED.scraped_date;
+                """,
+                offer
+            )
+            inserted += 1  # Technically this counts both inserts and updates
+
+    except Exception as e:
+        logger.error(f"[Internal Sync] DB load failed: {e}")
+        raise
+    finally:
+        db.close()
+
+    print(f"  [Internal Sync] ✅ DB load complete — {inserted} records upserted")
+    return {"upserted": inserted, "skipped": skipped}
