@@ -2,7 +2,7 @@
 
 A retail competitor promotion monitoring pipeline. Scrapes coupon/deal websites, extracts structured promotional offers using AI, and produces clean validated JSON — ready for database ingestion and business insights.
 
-> **Current state:** Layers 0–2 implemented (Ingestion → Extraction → Processing). Layer 3+ (Database, Insights, Recommendations, UI) in progress.
+> **Current state:** Layers 0–3 implemented (Ingestion → Extraction → Processing → DB Load). Layer 4+ (Insights, Recommendations, UI) in progress.
 
 ---
 
@@ -13,7 +13,7 @@ Layer 8 — AI Chatbot               (planned)
 Layer 7 — Streamlit Dashboard      (planned)
 Layer 5 — Recommendation Engine    (planned)
 Layer 4 — Insights Engine          (planned)
-Layer 3 — PostgreSQL Database      (planned)
+Layer 3 — PostgreSQL Database      ✅ database/loader.py
 Layer 2 — Processing               ✅ processing/post_processor.py
 Layer 1 — AI Extraction            ✅ extraction/groq_extractor.py
 Layer 0 — Ingestion                ✅ ingestion/firecrawl_fetcher.py
@@ -41,6 +41,11 @@ AI_Promotional_POC/
 │
 ├── processing/
 │   └── post_processor.py            # Layer 2: validate, normalise, deduplicate
+│
+├── database/
+│   ├── db_client.py                 # Layer 3: psycopg2 connection pool
+│   ├── loader.py                    # Layer 3: idempotent upsert
+│   └── schema.sql                   # Layer 3: table definitions
 │
 ├── output/                          # Timestamped JSON outputs (gitignored)
 └── tests/
@@ -83,23 +88,32 @@ pip install -r requirements.txt
 
 ## How to Run (Layers 0–2)
 
-### Full pipeline — all providers
+### Full pipeline (Layers 0-3 for all providers)
+```bash
+python main.py
+```
+
+### Specific providers only (with DB load)
+```bash
+python main.py --providers Myntra Nykaa
+```
+
+### Run pipeline but skip the DB load (Layers 0-2 only)
 ```bash
 python main.py --skip-db
 ```
 
-### Specific providers only
-```bash
-python main.py --providers Myntra Nykaa --skip-db
-```
-
-### Re-run AI extraction on already-scraped data
+### Layer 1-3: AI extraction on already-scraped data
 Saves Firecrawl API credits — reuses a saved `raw_markdown_*.json` file:
 ```bash
-python main.py --extract-only output/raw_markdown_Myntra_2026-04-07_14-20-00.json
+python main.py --extract-only output/raw_markdown_Myntra_2026-04-07.json
 ```
 
-> Remove `--skip-db` once Layer 3 (database) is built.
+### Layer 3: Load existing clean JSON into DB
+Bypasses both APIs to load processed data natively into the DB:
+```bash
+python main.py --load-only output/promotions_clean_Myntra_2026-04-07.json
+```
 
 ---
 
@@ -159,6 +173,12 @@ Three sequential steps:
 1. **Field Validation** — drops offers missing `offer_title`, drops hallucinated discounts (>100%), swaps `discount_min`/`discount_max` if inverted, applies defaults for `user_type` and `promo_type`
 2. **Category Normalisation** — maps synonyms to canonical names using `CATEGORY_MAP` (e.g. `"sportswear"` → `"Sports"`, `"cosmetics"` → `"Beauty"`)
 3. **Fuzzy Deduplication** — uses `rapidfuzz` with 85% title similarity threshold + same `discount_min` to identify duplicates; merges richer fields; tracks `source_count`
+
+### Layer 3 — Database (`database/loader.py`)
+
+- Thin `psycopg2` client wrapper using `SimpleConnectionPool` and `RealDictCursor`
+- **Fully idempotent**: Uses `ON CONFLICT DO NOTHING` for competitors and checks `(offer_title, competitor_id, scraped_date)` to avoid duplicates
+- Separates `promotions` tracking from `internal_pricing` mapping for margins
 
 ---
 

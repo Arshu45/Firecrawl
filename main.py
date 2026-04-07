@@ -5,7 +5,8 @@ Usage:
     python main.py                           # Run full pipeline (all providers)
     python main.py --providers Myntra Nykaa  # Specific providers
     python main.py --providers Myntra --skip-db  # Skip DB load (Layers 0-2 only)
-    python main.py --extract-only output/raw_markdown_Myntra_*.json  # Re-run from saved markdown
+    python main.py --extract-only output/raw_markdown_Myntra_*.json  # Re-run Layer 1-3
+    python main.py --load-only output/promotions_clean_Myntra_*.json # Re-run Layer 3 only
 """
 
 import json
@@ -18,6 +19,7 @@ from config.settings import COMPETITOR_SITES, OUTPUT_DIR
 from ingestion.firecrawl_fetcher import fetch_promotions, fetch_all
 from extraction.groq_extractor   import extract_from_page, extract_all
 from processing.post_processor   import process, process_all
+from database.loader             import load_promotions, load_all
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -174,6 +176,37 @@ def run_extract_only(raw_file: str, skip_db: bool = False):
     print(f"\n✅ Clean output → {out_path}")
     print(f"   {clean['total_clean']} clean offers from {clean['total_raw']} raw")
 
+    # Layer 3
+    if not skip_db:
+        try:
+            from database.loader import load_promotions
+            db_result = load_promotions(clean)
+            print(f"  [{provider}] DB load complete: {db_result['inserted']} inserted, {db_result['skipped']} skipped")
+        except Exception as e:
+            print(f"  [{provider}] ❌ DB load failed: {e}")
+    else:
+        print(f"  [{provider}] ⏭  DB load skipped (--skip-db)")
+
+def run_load_only(clean_file: str):
+    """Re-run database load on a previously saved clean JSON file."""
+    if not os.path.exists(clean_file):
+        print(f"❌ File not found: {clean_file}"); return
+
+    with open(clean_file, encoding="utf-8") as f:
+        clean_data = json.load(f)
+
+    print(f"\n📂 Loaded clean data from {clean_file}")
+    
+    try:
+        from database.loader import load_promotions
+        result = load_promotions(clean_data)
+        print(f"  ✅ DB load complete: {result['inserted']} inserted, {result['skipped']} skipped")
+    except ImportError:
+        print("  ⚠️  database.loader not found")
+    except Exception as e:
+        print(f"  ❌ DB load failed: {e}")
+
+
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
@@ -198,12 +231,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--extract-only",
         metavar = "RAW_FILE",
-        help    = "Re-run extraction on an existing raw_markdown_*.json file"
+        help    = "Re-run extraction (+ DB load) on an existing raw_markdown_*.json file"
+    )
+    parser.add_argument(
+        "--load-only",
+        metavar = "CLEAN_FILE",
+        help    = "Run database load on an existing promotions_clean_*.json file"
     )
 
     args = parser.parse_args()
 
-    if args.extract_only:
+    if args.load_only:
+        run_load_only(args.load_only)
+    elif args.extract_only:
         run_extract_only(args.extract_only, skip_db=args.skip_db)
     else:
         result = run_pipeline(args.providers, skip_db=args.skip_db)
