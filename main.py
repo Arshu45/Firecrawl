@@ -5,7 +5,9 @@ Usage:
     python main.py                           # Run full pipeline (all providers)
     python main.py --providers Myntra Nykaa  # Specific providers
     python main.py --providers Myntra --skip-db  # Skip DB load (Layers 0-2 only)
-    python main.py --extract-only output/raw_markdown_Myntra_*.json  # Re-run from saved markdown
+    python main.py --extract-only output/raw_markdown_Myntra_*.json  # Re-run Layer 1-3
+    python main.py --load-only output/promotions_clean_Myntra_*.json # Re-run Layer 3 only
+    python main.py --sync-internal                   # Fetch & Load MySQL Store Data
 """
 
 import json
@@ -18,6 +20,7 @@ from config.settings import COMPETITOR_SITES, OUTPUT_DIR
 from ingestion.firecrawl_fetcher import fetch_promotions, fetch_all
 from extraction.groq_extractor   import extract_from_page, extract_all
 from processing.post_processor   import process, process_all
+from database.loader             import load_promotions, load_all
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -174,6 +177,59 @@ def run_extract_only(raw_file: str, skip_db: bool = False):
     print(f"\n✅ Clean output → {out_path}")
     print(f"   {clean['total_clean']} clean offers from {clean['total_raw']} raw")
 
+    # Layer 3
+    if not skip_db:
+        try:
+            from database.loader import load_promotions
+            db_result = load_promotions(clean)
+            print(f"  [{provider}] DB load complete: {db_result['inserted']} inserted, {db_result['skipped']} skipped")
+        except Exception as e:
+            print(f"  [{provider}] ❌ DB load failed: {e}")
+    else:
+        print(f"  [{provider}] ⏭  DB load skipped (--skip-db)")
+
+def run_load_only(clean_file: str):
+    """Re-run database load on a previously saved clean JSON file."""
+    if not os.path.exists(clean_file):
+        print(f"❌ File not found: {clean_file}"); return
+
+    with open(clean_file, encoding="utf-8") as f:
+        clean_data = json.load(f)
+
+    print(f"\n📂 Loaded clean data from {clean_file}")
+    
+    try:
+        from database.loader import load_promotions
+        result = load_promotions(clean_data)
+        print(f"  ✅ DB load complete: {result['inserted']} inserted, {result['skipped']} skipped")
+    except ImportError:
+        print("  ⚠️  database.loader not found")
+    except Exception as e:
+        print(f"  ❌ DB load failed: {e}")
+
+def run_sync_internal():
+    """Runs the internal MySQL -> Postgres connector pipeline."""
+    from connectors.mysql_fetcher import fetch_internal_promotions
+    from connectors.transformer import transform_internal_data
+    from database.loader import load_internal_promotions
+
+    print("\n🚀 Syncing Internal Store Data (MySQL -> Postgres)...")
+    
+    try:
+        raw_rows = fetch_internal_promotions()
+        if not raw_rows:
+            print("  ⚠️  No active internal promotions fetched.")
+            return
+
+        transformed = transform_internal_data(raw_rows)
+        print(f"  ✅ Transformed {len(transformed)} promotions to unified schema.")
+
+        result = load_internal_promotions(transformed)
+        print(f"\n🎉 Internal Sync Complete: {result['upserted']} records successfully upserted.")
+
+    except Exception as e:
+        print(f"\n❌ Internal Sync Failed: {e}")
+
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
@@ -198,12 +254,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--extract-only",
         metavar = "RAW_FILE",
-        help    = "Re-run extraction on an existing raw_markdown_*.json file"
+        help    = "Re-run extraction (+ DB load) on an existing raw_markdown_*.json file"
+    )
+    parser.add_argument(
+        "--load-only",
+        metavar = "CLEAN_FILE",
+        help    = "Run database load on an existing promotions_clean_*.json file"
+    )
+    parser.add_argument(
+        "--sync-internal",
+        action  = "store_true",
+        help    = "Extract from internal MySQL, transform, and load into Postgres (Internal Connector)"
     )
 
     args = parser.parse_args()
 
-    if args.extract_only:
+    if args.sync_internal:
+        run_sync_internal()
+    elif args.load_only:
+        run_load_only(args.load_only)
+    elif args.extract_only:
         run_extract_only(args.extract_only, skip_db=args.skip_db)
     else:
         result = run_pipeline(args.providers, skip_db=args.skip_db)
