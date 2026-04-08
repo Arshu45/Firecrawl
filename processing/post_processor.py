@@ -17,6 +17,7 @@ import json
 import os
 import logging
 import datetime as dt
+import re
 from copy import deepcopy
 
 from rapidfuzz import fuzz
@@ -29,20 +30,104 @@ from config.settings import (
 logger = logging.getLogger(__name__)
 
 
+_NULL_LIKE = {"", "null", "none", "n/a", "na", "-", "--"}
+
+
+def _clean_scalar(value):
+    """Convert common placeholder strings like 'NULL' into real None values."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in _NULL_LIKE:
+            return None
+        return stripped
+    return value
+
+
+def _parse_scraped_date(scraped_date: str | None) -> dt.date:
+    if not scraped_date:
+        return dt.date.today()
+    try:
+        return dt.date.fromisoformat(scraped_date)
+    except ValueError:
+        return dt.date.today()
+
+
+def _normalise_valid_until(value: str | None, scraped_date: str | None) -> str | None:
+    """Normalize relative or textual expiry strings to YYYY-MM-DD where possible."""
+    value = _clean_scalar(value)
+    if not value:
+        return None
+
+    base_date = _parse_scraped_date(scraped_date)
+    text = str(value).strip()
+    lowered = text.lower()
+
+    if lowered == "today":
+        return base_date.isoformat()
+    if lowered == "tomorrow":
+        return (base_date + dt.timedelta(days=1)).isoformat()
+
+    relative_match = re.fullmatch(r"(\d+)\s+(day|days|week|weeks|month|months)", lowered)
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2)
+        if "day" in unit:
+            delta_days = amount
+        elif "week" in unit:
+            delta_days = amount * 7
+        else:
+            # Approximation is acceptable here until schema/date parser is upgraded properly.
+            delta_days = amount * 30
+        return (base_date + dt.timedelta(days=delta_days)).isoformat()
+
+    for fmt in (
+        "%Y-%m-%d",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+    ):
+        try:
+            return dt.datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+
+    return text
+
+
+def _normalise_promo_type(cleaned: dict) -> str:
+    """Correct obvious promo_type misclassifications from the extractor."""
+    promo_type = cleaned.get("promo_type") or "other"
+    d_min = cleaned.get("discount_min")
+    d_max = cleaned.get("discount_max")
+    flat_value = cleaned.get("flat_value")
+
+    if flat_value is not None and (d_min is None and d_max is None):
+        return "flat"
+    if promo_type == "flat" and flat_value is None and (d_min is not None or d_max is not None):
+        return "percentage"
+    if promo_type == "bundle" and flat_value is None and d_min == d_max and d_min is not None:
+        return "percentage"
+    return promo_type
+
+
 # ── Step 1: Field Validation ───────────────────────────────────────────────────
 
-def _validate_offer(offer: dict, idx: int, provider: str) -> dict | None:
+def _validate_offer(offer: dict, idx: int, provider: str, scraped_date: str | None = None) -> dict | None:
     """
     Validates and sanitises a single offer dict.
     Returns cleaned offer or None if it should be dropped.
     """
+    cleaned = {key: _clean_scalar(val) for key, val in deepcopy(offer).items()}
+
     # Drop if no offer_title
-    title = (offer.get("offer_title") or "").strip()
+    title = (cleaned.get("offer_title") or "").strip()
     if not title:
         logger.warning(f"[{provider}] offer[{idx}] dropped — missing offer_title")
         return None
 
-    cleaned = deepcopy(offer)
     cleaned["offer_title"] = title
 
     # Numeric fields — cast to float, drop offer if clearly hallucinated
@@ -75,16 +160,18 @@ def _validate_offer(offer: dict, idx: int, provider: str) -> dict | None:
         cleaned["user_type"] = "all"
     if not cleaned.get("promo_type") or cleaned["promo_type"] not in VALID_PROMO_TYPES:
         cleaned["promo_type"] = "other"
+    cleaned["promo_type"] = _normalise_promo_type(cleaned)
+    cleaned["valid_until"] = _normalise_valid_until(cleaned.get("valid_until"), scraped_date)
 
     return cleaned
 
 
-def _validate_all(offers: list, provider: str) -> tuple[list, int]:
+def _validate_all(offers: list, provider: str, scraped_date: str | None = None) -> tuple[list, int]:
     """Returns (valid_offers, dropped_count)."""
     valid   = []
     dropped = 0
     for i, offer in enumerate(offers):
-        result = _validate_offer(offer, i, provider)
+        result = _validate_offer(offer, i, provider, scraped_date=scraped_date)
         if result is not None:
             valid.append(result)
         else:
@@ -206,7 +293,7 @@ def process(raw_result: dict) -> dict:
     print(f"\n  [{provider}] Processing {total_raw} raw offers...")
 
     # Step 1: Validate
-    valid_offers, dropped = _validate_all(raw_offers, provider)
+    valid_offers, dropped = _validate_all(raw_offers, provider, scraped_date=scraped_date)
     print(f"  [{provider}] Validation: {total_raw} raw → {len(valid_offers)} valid, {dropped} dropped")
 
     # Step 2: Normalise categories

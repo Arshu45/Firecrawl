@@ -47,6 +47,20 @@ def _top_offer_examples(rows: list[dict], limit: int = TOOL_SUMMARY_TOP_OFFERS) 
     return examples
 
 
+def _promo_type_breakdown(rows: list[dict]) -> dict[str, int]:
+    breakdown: dict[str, int] = {}
+    for row in rows:
+        promo_type = row.get("promo_type") or "other"
+        breakdown[promo_type] = breakdown.get(promo_type, 0) + 1
+    return breakdown
+
+
+def _coerce_float(value):
+    if value is None:
+        return None
+    return float(value)
+
+
 @tool
 def get_category_trends(category: str | None = None) -> str:
     """
@@ -68,6 +82,7 @@ def get_category_trends(category: str | None = None) -> str:
                 JOIN competitors c ON p.competitor_id = c.id
                 WHERE p.category IS NOT NULL
                   AND p.discount_max IS NOT NULL
+                  AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
                 GROUP BY p.category, c.name
                 ORDER BY p.category, avg_discount DESC NULLS LAST
                 """
@@ -81,7 +96,7 @@ def get_category_trends(category: str | None = None) -> str:
                     COUNT(*) AS active_offers
                 FROM internal_promotions
                 WHERE category IS NOT NULL
-                  AND valid_until >= CURRENT_DATE::text
+                  AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
                   AND discount_max IS NOT NULL
                 GROUP BY category
                 ORDER BY category
@@ -97,7 +112,9 @@ def get_category_trends(category: str | None = None) -> str:
                     ROUND(AVG(discount_max), 2) as avg_discount, 
                     COUNT(*) as active_offers
                 FROM internal_promotions
-                WHERE category = %s AND valid_until >= CURRENT_DATE::text AND discount_max IS NOT NULL
+                WHERE category = %s
+                  AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
+                  AND discount_max IS NOT NULL
                 
                 UNION ALL
                 
@@ -107,7 +124,9 @@ def get_category_trends(category: str | None = None) -> str:
                     COUNT(p.id) as active_offers
                 FROM promotions p
                 JOIN competitors c ON p.competitor_id = c.id
-                WHERE p.category = %s AND p.discount_max IS NOT NULL
+                WHERE p.category = %s
+                  AND p.discount_max IS NOT NULL
+                  AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
                 GROUP BY c.name
                 """,
                 (CLIENT_BRAND, category, category),
@@ -179,7 +198,9 @@ def get_top_competitors(category: str, limit: int = DEFAULT_TOP_COMPETITORS_LIMI
         ROUND(AVG(p.discount_max), 2) as avg_discount
     FROM promotions p
     JOIN competitors c ON p.competitor_id = c.id
-    WHERE p.category = %s AND p.discount_max IS NOT NULL
+    WHERE p.category = %s
+      AND p.discount_max IS NOT NULL
+      AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
     GROUP BY c.name
     ORDER BY deepest_discount DESC
     LIMIT %s
@@ -237,7 +258,7 @@ def get_active_offers(
         query = """
         SELECT offer_title, category, promo_type, discount_max, valid_until
         FROM internal_promotions
-        WHERE valid_until >= CURRENT_DATE::text
+        WHERE (valid_until IS NULL OR valid_until >= CURRENT_DATE)
           AND (%s IS NULL OR category = %s)
         ORDER BY discount_max DESC NULLS LAST
         LIMIT %s
@@ -245,11 +266,12 @@ def get_active_offers(
         params = (category, category, limit)
     else:
         query = """
-        SELECT p.offer_title, p.category, p.promo_type, p.discount_max
+        SELECT p.offer_title, p.category, p.promo_type, p.discount_max, p.valid_until
         FROM promotions p
         JOIN competitors c ON p.competitor_id = c.id
         WHERE c.name ILIKE %s
           AND (%s IS NULL OR p.category = %s)
+          AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
         ORDER BY p.discount_max DESC NULLS LAST
         LIMIT %s
         """
@@ -265,6 +287,8 @@ def get_active_offers(
     )
         
     if not rows:
+        if category:
+            return f"No active offers found for brand: {brand} in {category}."
         return f"No active offers found for brand: {brand}."
 
     discounts = [float(row["discount_max"]) for row in rows if row.get("discount_max") is not None]
@@ -274,7 +298,8 @@ def get_active_offers(
         "returned_offer_count": len(rows),
         "avg_discount": round(sum(discounts) / len(discounts), 2) if discounts else None,
         "max_discount": max(discounts) if discounts else None,
-        "top_offers": _top_offer_examples(rows),
+        "promo_type_breakdown": _promo_type_breakdown(rows),
+        "top_offers": _top_offer_examples(rows, limit=min(limit, max(TOOL_SUMMARY_TOP_OFFERS, 5))),
     }
     result = _serialize_payload(payload)
     logger.info("Tool get_active_offers returning | payload=%s", _truncate(result))
@@ -295,18 +320,19 @@ def get_recommendation(category: str, competitor: str) -> str:
         competitor,
     )
 
-    query = """
+    stats_query = """
     WITH competitor_stats AS (
         SELECT
             c.name AS competitor,
             ROUND(AVG(p.discount_max), 2) AS competitor_avg_discount,
             MAX(p.discount_max) AS competitor_deepest_discount,
-            COUNT(*) AS competitor_offer_count
+            COUNT(*) AS competitor_quantified_offer_count
         FROM promotions p
         JOIN competitors c ON p.competitor_id = c.id
         WHERE c.name ILIKE %s
           AND p.category = %s
           AND p.discount_max IS NOT NULL
+          AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
         GROUP BY c.name
     ),
     internal_stats AS (
@@ -316,7 +342,7 @@ def get_recommendation(category: str, competitor: str) -> str:
             COUNT(*) AS internal_offer_count
         FROM internal_promotions
         WHERE category = %s
-          AND valid_until >= CURRENT_DATE::text
+          AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
           AND discount_max IS NOT NULL
     )
     SELECT
@@ -324,7 +350,7 @@ def get_recommendation(category: str, competitor: str) -> str:
         cs.competitor,
         cs.competitor_avg_discount,
         cs.competitor_deepest_discount,
-        cs.competitor_offer_count,
+        cs.competitor_quantified_offer_count,
         ist.internal_avg_discount,
         ist.internal_deepest_discount,
         ist.internal_offer_count
@@ -333,7 +359,31 @@ def get_recommendation(category: str, competitor: str) -> str:
     """
 
     with DBClient() as db:
-        row = db.execute_one(query, (competitor, category, category, CLIENT_BRAND))
+        row = db.execute_one(stats_query, (competitor, category, category, CLIENT_BRAND))
+        competitor_offer_rows = db.execute(
+            """
+            SELECT p.offer_title, p.category, p.promo_type, p.discount_max, p.flat_value, p.valid_until
+            FROM promotions p
+            JOIN competitors c ON p.competitor_id = c.id
+            WHERE c.name ILIKE %s
+              AND p.category = %s
+              AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
+            ORDER BY p.discount_max DESC NULLS LAST, p.flat_value DESC NULLS LAST, p.offer_title
+            LIMIT %s
+            """,
+            (competitor, category, max(DEFAULT_ACTIVE_OFFERS_LIMIT, 5)),
+        )
+        internal_offer_rows = db.execute(
+            """
+            SELECT offer_title, category, promo_type, discount_max, flat_value, valid_until
+            FROM internal_promotions
+            WHERE category = %s
+              AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
+            ORDER BY discount_max DESC NULLS LAST, flat_value DESC NULLS LAST, offer_title
+            LIMIT %s
+            """,
+            (category, max(DEFAULT_ACTIVE_OFFERS_LIMIT, 5)),
+        )
 
     logger.info("Tool get_recommendation DB row fetched | row=%s", _truncate(row))
 
@@ -349,11 +399,16 @@ def get_recommendation(category: str, competitor: str) -> str:
         logger.info("Tool get_recommendation returning | payload=%s", _truncate(payload))
         return payload
 
-    competitor_avg = float(row["competitor_avg_discount"]) if row["competitor_avg_discount"] is not None else None
-    competitor_deepest = float(row["competitor_deepest_discount"]) if row["competitor_deepest_discount"] is not None else None
-    internal_avg = float(row["internal_avg_discount"]) if row["internal_avg_discount"] is not None else None
-    internal_deepest = float(row["internal_deepest_discount"]) if row["internal_deepest_discount"] is not None else None
+    competitor_avg = _coerce_float(row["competitor_avg_discount"])
+    competitor_deepest = _coerce_float(row["competitor_deepest_discount"])
+    internal_avg = _coerce_float(row["internal_avg_discount"])
+    internal_deepest = _coerce_float(row["internal_deepest_discount"])
     internal_offer_count = int(row["internal_offer_count"] or 0)
+    competitor_quantified_offer_count = int(row["competitor_quantified_offer_count"] or 0)
+    competitor_active_offer_count = len(competitor_offer_rows)
+    internal_active_offer_count = len(internal_offer_rows)
+    competitor_breakdown = _promo_type_breakdown(competitor_offer_rows)
+    internal_breakdown = _promo_type_breakdown(internal_offer_rows)
 
     if internal_offer_count == 0 or internal_avg is None:
         result = {
@@ -363,6 +418,14 @@ def get_recommendation(category: str, competitor: str) -> str:
             "recommendation": f"Populate {CLIENT_BRAND}'s internal promotions for {category} before making a pricing move.",
             "reason": f"{CLIENT_BRAND} has no active comparable offers in {category}, so any recommendation would be one-sided.",
             "urgency": "high",
+            "competitor_context": {
+                "active_offer_count": competitor_active_offer_count,
+                "quantified_offer_count": competitor_quantified_offer_count,
+                "avg_discount": competitor_avg,
+                "deepest_discount": competitor_deepest,
+                "promo_type_breakdown": competitor_breakdown,
+                "top_offers": _top_offer_examples(competitor_offer_rows),
+            },
         }
         payload = _serialize_payload(result)
         logger.info("Tool get_recommendation returning | payload=%s", _truncate(payload))
@@ -373,27 +436,52 @@ def get_recommendation(category: str, competitor: str) -> str:
 
     if avg_gap >= 15 or deepest_gap >= 20:
         urgency = "high"
-        action = "Close most of the gap quickly, but prefer a targeted category push or bundle over a blanket sitewide discount."
+        action = f"Launch a targeted {category} response this week. Close most of the gap with a focused discount or bundle, not a sitewide markdown."
+        target_discount_range = [max(0, round(competitor_avg - 5, 2)), round(competitor_avg, 2)]
     elif avg_gap >= 5 or deepest_gap >= 10:
         urgency = "medium"
-        action = "Partially narrow the gap with a measured discount or bundle, then monitor competitor moves."
+        action = "Narrow part of the gap with a measured discount or bundle, then monitor competitor moves before expanding."
+        target_discount_range = [max(0, round(competitor_avg - 10, 2)), max(0, round(competitor_avg - 5, 2))]
     else:
         urgency = "low"
         action = "Do not aggressively match. Keep pricing steady and differentiate with bundles, merchandising, or limited-time offers."
+        target_discount_range = [round(internal_avg, 2), round(max(internal_avg, competitor_avg or internal_avg), 2)]
+
+    competitor_has_bundles = competitor_breakdown.get("bundle", 0) > 0
+    competitor_has_flat = competitor_breakdown.get("flat", 0) > 0
+    if competitor_has_bundles:
+        recommended_tactic = "bundle"
+        tactic_reason = f"{competitor} is already using bundle-style promotions in {category}, so a bundle or add-on offer is a safer way to respond than a blanket markdown."
+    elif competitor_has_flat:
+        recommended_tactic = "targeted_discount"
+        tactic_reason = f"{competitor} is mixing flat-value offers with percentage discounts in {category}, so a targeted discount paired with a threshold offer is more comparable than a generic sale banner."
+    else:
+        recommended_tactic = "percentage_discount"
+        tactic_reason = f"{competitor} is mostly competing on straight discounts in {category}, so a clean category discount is the clearest response."
 
     result = {
         "status": "ok",
         "client_brand": CLIENT_BRAND,
         "category": category,
         "competitor": competitor,
+        "urgency": urgency,
         "competitor_avg_discount": competitor_avg,
         "competitor_deepest_discount": competitor_deepest,
+        "competitor_active_offer_count": competitor_active_offer_count,
+        "competitor_quantified_offer_count": competitor_quantified_offer_count,
+        "competitor_promo_type_breakdown": competitor_breakdown,
+        "competitor_top_offers": _top_offer_examples(competitor_offer_rows),
         "internal_avg_discount": internal_avg,
         "internal_deepest_discount": internal_deepest,
+        "internal_active_offer_count": internal_active_offer_count,
+        "internal_promo_type_breakdown": internal_breakdown,
+        "internal_top_offers": _top_offer_examples(internal_offer_rows),
         "avg_gap": avg_gap,
         "deepest_gap": deepest_gap,
-        "urgency": urgency,
+        "recommended_tactic": recommended_tactic,
+        "target_discount_range": target_discount_range,
         "recommendation": action,
+        "tactic_reason": tactic_reason,
         "reason": f"{competitor} is ahead of {CLIENT_BRAND} by {avg_gap}% on average discount and {deepest_gap}% at the deepest discount point in {category}.",
     }
     payload = _serialize_payload(result)

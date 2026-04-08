@@ -1,13 +1,13 @@
 import time
 import logging
 import re
+import json
 from typing import Any
 
 from langchain_groq import ChatGroq
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 from langchain.agents import create_agent
-from langgraph.checkpoint.memory import MemorySaver
 
 from config.settings import (
     CLIENT_BRAND, 
@@ -40,6 +40,22 @@ def _truncate(value: Any, limit: int = 500) -> str:
 KNOWN_BRANDS = {
     CLIENT_BRAND.lower(),
 } | {name.lower() for name in COMPETITOR_SITES.keys()}
+
+BRAND_CANONICAL_MAP = {
+    CLIENT_BRAND.lower(): CLIENT_BRAND,
+    **{name.lower(): name for name in COMPETITOR_SITES.keys()},
+}
+
+CATEGORY_CANONICAL_MAP = {
+    "fashion": "Fashion",
+    "footwear": "Footwear",
+    "beauty": "Beauty",
+    "electronics": "Electronics",
+    "home": "Home",
+    "sports": "Sports",
+    "jewellery": "Jewellery",
+    "jewelry": "Jewellery",
+}
 
 
 def _normalize_words(query: str) -> set[str]:
@@ -76,6 +92,94 @@ def _history_to_messages(history: list[dict] | None) -> list[dict]:
         if role in {"user", "assistant"} and content:
             messages.append({"role": role, "content": content})
     return messages
+
+
+def _extract_brand(query: str) -> str | None:
+    lowered = query.lower()
+    for brand_key, brand_name in BRAND_CANONICAL_MAP.items():
+        if brand_key in lowered:
+            return brand_name
+    return None
+
+
+def _extract_category(query: str) -> str | None:
+    words = _normalize_words(query)
+    for category_key, category_name in CATEGORY_CANONICAL_MAP.items():
+        if category_key in words:
+            return category_name
+    return None
+
+
+def _is_recommendation_query(query: str) -> bool:
+    words = _normalize_words(query)
+    return bool(words & {"recommend", "recommendation", "should", "strategy"})
+
+
+def _format_recommendation_response(payload: dict) -> str:
+    status = payload.get("status")
+    if status == "missing_competitor_data":
+        return payload.get("recommendation", "No competitor data found for that recommendation.")
+    if status == "missing_internal_data":
+        recommendation = payload.get("recommendation", "")
+        reason = payload.get("reason", "")
+        competitor_context = payload.get("competitor_context") or {}
+        top_offers = competitor_context.get("top_offers") or []
+        examples = ", ".join(
+            f"{offer.get('offer_title')} ({offer.get('discount_max') or 'no % value'})"
+            for offer in top_offers[:3]
+            if offer.get("offer_title")
+        )
+        parts = [recommendation]
+        if reason:
+            parts.append(reason)
+        if examples:
+            parts.append(f"Current {payload.get('competitor')} examples: {examples}.")
+        return " ".join(parts)
+
+    competitor = payload.get("competitor")
+    category = payload.get("category")
+    urgency = str(payload.get("urgency", "")).lower()
+    competitor_avg = payload.get("competitor_avg_discount")
+    internal_avg = payload.get("internal_avg_discount")
+    target_range = payload.get("target_discount_range") or []
+    tactic = payload.get("recommended_tactic")
+    recommendation = payload.get("recommendation", "")
+    reason = payload.get("reason", "")
+    tactic_reason = payload.get("tactic_reason", "")
+    top_offers = payload.get("competitor_top_offers") or []
+
+    urgency_prefix = {
+        "high": "High urgency.",
+        "medium": "Medium urgency.",
+        "low": "Low urgency.",
+    }.get(urgency, "")
+
+    parts = []
+    if urgency_prefix:
+        parts.append(urgency_prefix)
+    parts.append(
+        f"{competitor} is currently ahead in {category}: average discount {competitor_avg}% versus {CLIENT_BRAND} at {internal_avg}%."
+    )
+    parts.append(recommendation)
+    if len(target_range) == 2:
+        parts.append(
+            f"Recommended response range: aim for roughly {target_range[0]}% to {target_range[1]}% effective value in {category}."
+        )
+    if tactic:
+        parts.append(f"Best tactic: {tactic.replace('_', ' ')}.")
+    if tactic_reason:
+        parts.append(tactic_reason)
+    if reason:
+        parts.append(reason)
+    if top_offers:
+        examples = ", ".join(
+            f"{offer.get('offer_title')} ({offer.get('discount_max') or 'flat/value-based'})"
+            for offer in top_offers[:3]
+            if offer.get("offer_title")
+        )
+        if examples:
+            parts.append(f"Competitor examples: {examples}.")
+    return " ".join(part for part in parts if part)
 
 class TokenUsageCallback(BaseCallbackHandler):
     """Tracks per-call and cumulative LLM token usage across an agent loop."""
@@ -171,19 +275,18 @@ You help the marketing and pricing teams analyze competitor promotions and make 
 4. Never invent a category, brand, offer, or numerical value to make a tool call.
 5. Do not mix results from unrelated categories or brands into one recommendation.
 6. When the user asks what we should do, what we can do, or asks for a recommendation, always call get_recommendation for the specific competitor and category before answering — even if {CLIENT_BRAND} internal data may be missing. The tool handles missing internal data gracefully and will tell you what to say.
+6a. After get_recommendation returns, do not call get_active_offers unless the user explicitly asked to list concrete offers, examples, or more detail about the competitor's offers.
 7. When the question is category-specific, always keep tool scope aligned to that category.
 8. Use get_active_offers only when the user explicitly asks for exact offers for a specific brand, or when listing examples for that same brand and category.
 9. We are "{CLIENT_BRAND}". Discuss internal data as {CLIENT_BRAND}'s promotions.
 10. Be specific. Mention exact percentages, rupees, and brand names.
-11. Provide actionable insights based on the numerical gaps between us and competitors."""
+11. Provide actionable insights based on the numerical gaps between us and competitors.
+12. When the user asks for more detail, more examples, or a deeper offer listing, request a higher get_active_offers limit instead of repeating the same short summary."""
 
-            # Using Langchain create_agent with LangGraph MemorySaver
-            self.memory = MemorySaver()
             self.graph = create_agent(
                 model=self.llm,
                 tools=self.tools,
                 system_prompt=system_prompt,
-                checkpointer=self.memory
             )
             
             logger.info(
@@ -225,6 +328,51 @@ You help the marketing and pricing teams analyze competitor promotions and make 
                     query,
                 )
                 return f"Which brand or category should I analyze? For example: {CLIENT_BRAND}, Myntra, Nykaa, or a category like Fashion, Beauty, or Electronics."
+
+            if _is_recommendation_query(query):
+                competitor = _extract_brand(query)
+                category = _extract_category(query)
+                if competitor and category and competitor.lower() != CLIENT_BRAND.lower():
+                    logger.info(
+                        "Deterministic recommendation path selected | session_id=%s | competitor=%s | category=%s",
+                        session_id,
+                        competitor,
+                        category,
+                    )
+                    token_cb.tool_calls += 1
+                    token_cb.tool_names.append(get_recommendation.name)
+                    tool_payload = get_recommendation.invoke(
+                        {"category": category, "competitor": competitor}
+                    )
+                    logger.info(
+                        "Deterministic recommendation tool returned | payload=%s",
+                        _truncate(tool_payload),
+                    )
+                    parsed_payload = json.loads(tool_payload)
+                    final_message = _format_recommendation_response(parsed_payload)
+                    logger.info(
+                        "Agent final response ready | session_id=%s | response_preview=%s",
+                        session_id,
+                        _truncate(final_message),
+                    )
+                    logger.info(f"""
+    AGENT EXECUTION REPORT
+    
+    Session      : {session_id}
+    Query        : {query}
+    
+    ⏱  TIMING BREAKDOWN
+    ──────────────────────────────────────────────────────────
+    Setup Logic            : {(time.perf_counter() - t0):.4f}s
+    Agent Invoke (LLM+Tool): 0.0000s
+    🔥 TOTAL TIME          : {(time.perf_counter() - start_total):.4f}s
+    
+    📊 TOKEN USAGE
+    {token_cb.token_table()}
+    
+    Tool Calls             : {token_cb.tool_calls} ({', '.join(token_cb.tool_names) if token_cb.tool_names else 'none'})
+""")
+                    return final_message
             
             messages = _history_to_messages(history)
             messages.append({"role": "user", "content": query})

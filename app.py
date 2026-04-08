@@ -123,6 +123,7 @@ def fetch_dashboard_data() -> dict:
                 ROUND(AVG(discount_max), 2) AS avg_discount
             FROM promotions
             WHERE category IS NOT NULL
+              AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
             GROUP BY category
             ORDER BY offer_count DESC, category
             """
@@ -139,6 +140,7 @@ def fetch_dashboard_data() -> dict:
             FROM promotions p
             JOIN competitors c ON p.competitor_id = c.id
             WHERE p.category IS NOT NULL
+              AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
             GROUP BY c.name, p.category
             ORDER BY p.category, avg_discount DESC NULLS LAST
             """
@@ -153,6 +155,7 @@ def fetch_dashboard_data() -> dict:
                 MAX(discount_max) AS deepest_discount
             FROM internal_promotions
             WHERE category IS NOT NULL
+              AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
             GROUP BY category
             ORDER BY offer_count DESC, category
             """
@@ -169,6 +172,7 @@ def fetch_dashboard_data() -> dict:
                 p.scraped_date
             FROM promotions p
             JOIN competitors c ON p.competitor_id = c.id
+            WHERE p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE
             ORDER BY p.scraped_date DESC, p.discount_max DESC NULLS LAST
             LIMIT 20
             """
@@ -184,6 +188,7 @@ def fetch_dashboard_data() -> dict:
                 valid_until,
                 scraped_date
             FROM internal_promotions
+            WHERE valid_until IS NULL OR valid_until >= CURRENT_DATE
             ORDER BY scraped_date DESC, discount_max DESC NULLS LAST
             LIMIT 20
             """

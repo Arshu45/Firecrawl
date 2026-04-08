@@ -11,10 +11,48 @@ Public API:
     load_all(clean_results: list)     -> {"total_inserted": int, "total_skipped": int}
 """
 
+import datetime as dt
 import logging
 from database.db_client import DBClient
 
 logger = logging.getLogger(__name__)
+
+
+_NULL_LIKE = {"", "null", "none", "n/a", "na", "-", "--"}
+
+
+def _clean_scalar(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in _NULL_LIKE:
+            return None
+        return stripped
+    return value
+
+
+def _coerce_date(value):
+    value = _clean_scalar(value)
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if isinstance(value, str):
+        try:
+            return dt.date.fromisoformat(value)
+        except ValueError:
+            logger.warning("Could not coerce valid_until to date: %r", value)
+            return None
+    return None
+
+
+def _prepare_offer_for_db(offer: dict, source_url: str, scraped_date: str) -> dict:
+    prepared = {key: _clean_scalar(val) for key, val in offer.items()}
+    prepared["source_url"] = _clean_scalar(source_url)
+    prepared["scraped_date"] = _coerce_date(scraped_date) or scraped_date
+    prepared["valid_until"] = _coerce_date(prepared.get("valid_until"))
+    return prepared
 
 
 # ── Upsert competitor ──────────────────────────────────────────────────────────
@@ -80,21 +118,21 @@ def _insert_offer(db: DBClient, offer: dict, competitor_id: int, scraped_date: s
         """,
         {
             "competitor_id": competitor_id,
-            "offer_title"  : offer.get("offer_title"),
-            "description"  : offer.get("description"),
-            "brand"        : offer.get("brand"),
-            "category"     : offer.get("category"),
-            "promo_type"   : offer.get("promo_type", "other"),
+            "offer_title"  : _clean_scalar(offer.get("offer_title")),
+            "description"  : _clean_scalar(offer.get("description")),
+            "brand"        : _clean_scalar(offer.get("brand")),
+            "category"     : _clean_scalar(offer.get("category")),
+            "promo_type"   : _clean_scalar(offer.get("promo_type", "other")),
             "discount_min" : offer.get("discount_min"),
             "discount_max" : offer.get("discount_max"),
             "flat_value"   : offer.get("flat_value"),
             "min_purchase" : offer.get("min_purchase"),
-            "coupon_code"  : offer.get("coupon_code"),
-            "user_type"    : offer.get("user_type", "all"),
-            "valid_until"  : offer.get("valid_until"),
+            "coupon_code"  : _clean_scalar(offer.get("coupon_code")),
+            "user_type"    : _clean_scalar(offer.get("user_type", "all")),
+            "valid_until"  : _coerce_date(offer.get("valid_until")),
             "source_count" : offer.get("source_count", 1),
-            "source_url"   : offer.get("source_url"),
-            "scraped_date" : scraped_date,
+            "source_url"   : _clean_scalar(offer.get("source_url")),
+            "scraped_date" : _coerce_date(scraped_date) or scraped_date,
         },
     )
     return True
@@ -130,7 +168,7 @@ def load_promotions(clean_data: dict) -> dict:
 
         for offer in offers:
             # Attach source_url to offer for storage
-            offer_with_url = {**offer, "source_url": source_url}
+            offer_with_url = _prepare_offer_for_db(offer, source_url=source_url, scraped_date=scraped_date)
             was_inserted = _insert_offer(db, offer_with_url, competitor_id, scraped_date)
             if was_inserted:
                 inserted += 1
@@ -240,7 +278,19 @@ def load_internal_promotions(internal_offers: list[dict]) -> dict:
                     valid_until  = EXCLUDED.valid_until,
                     scraped_date = EXCLUDED.scraped_date;
                 """,
-                offer
+                {
+                    **offer,
+                    "offer_title": _clean_scalar(offer.get("offer_title")),
+                    "description": _clean_scalar(offer.get("description")),
+                    "brand": _clean_scalar(offer.get("brand")),
+                    "category": _clean_scalar(offer.get("category")),
+                    "promo_type": _clean_scalar(offer.get("promo_type")),
+                    "coupon_code": _clean_scalar(offer.get("coupon_code")),
+                    "user_type": _clean_scalar(offer.get("user_type")),
+                    "source_url": _clean_scalar(offer.get("source_url")),
+                    "valid_until": _coerce_date(offer.get("valid_until")),
+                    "scraped_date": _coerce_date(offer.get("scraped_date")) or offer.get("scraped_date"),
+                }
             )
             inserted += 1  # Technically this counts both inserts and updates
 
