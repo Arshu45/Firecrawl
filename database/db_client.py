@@ -21,7 +21,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
-from config.settings import DATABASE_URL
+from config.settings import DATABASE_URL, DB_MIN_CONN, DB_MAX_CONN
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,8 @@ def get_pool():
         with _pool_lock:
             if _global_pool is None:
                 _global_pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1,
-                    maxconn=10,
+                    minconn=DB_MIN_CONN,
+                    maxconn=DB_MAX_CONN,
                     dsn=DATABASE_URL,
                 )
                 logger.info("global DB connection pool created")

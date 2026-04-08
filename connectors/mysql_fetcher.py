@@ -8,12 +8,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded for the POC per user specs:
-MYSQL_HOST = "172.27.133.173"
-MYSQL_PORT = 3306
-MYSQL_USER = "readonly_user"
-MYSQL_PASS = "cybage@123"
-MYSQL_DB   = "fashion_retail"
+from config.settings import MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASS, MYSQL_DB
 
 def fetch_internal_promotions() -> list[dict]:
     """

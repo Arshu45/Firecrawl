@@ -1,10 +1,12 @@
 import logging
+from typing import Literal
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 from insights.agent import InsightsAgentService
+from config.settings import CLIENT_BRAND
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,14 +14,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Westside Promotion Intelligence API")
+app = FastAPI(title=f"{CLIENT_BRAND} Promotion Intelligence API")
 
 # Initialize the global agent instance so it maintains memory across requests
 agent_service = InsightsAgentService()
 
+class ChatHistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default_session"
+    history: list[ChatHistoryItem] = Field(default_factory=list)
 
 class ChatResponse(BaseModel):
     response: str
@@ -36,7 +44,11 @@ def chat_endpoint(request: ChatRequest):
     )
     try:
         # Agent execution using LangGraph State mapping
-        final_answer = agent_service.generate_response(request.message, request.session_id)
+        final_answer = agent_service.generate_response(
+            request.message,
+            request.session_id,
+            history=[item.model_dump() for item in request.history],
+        )
         logger.info(
             "Chat request complete | session_id=%s | response_chars=%d",
             request.session_id,

@@ -9,8 +9,21 @@ from langchain_core.outputs import LLMResult
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
 
-from config.settings import GROQ_API_KEY
-from insights.tools import get_category_trends, get_top_competitors, get_active_offers
+from config.settings import (
+    CLIENT_BRAND, 
+    GROQ_API_KEY, 
+    COMPETITOR_SITES,
+    KNOWN_CATEGORIES,
+    ANALYSIS_HINTS,
+    GROQ_MODEL,
+    GROQ_TEMPERATURE
+)
+from insights.tools import (
+    get_active_offers,
+    get_category_trends,
+    get_recommendation,
+    get_top_competitors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,19 +35,11 @@ def _truncate(value: Any, limit: int = 500) -> str:
     return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
 
 
-KNOWN_CATEGORIES = {
-    "fashion", "footwear", "beauty", "electronics",
-    "home", "sports", "jewellery", "jewelry",
-}
+# Built dynamically so switching CLIENT_BRAND or adding competitors in settings.py
+# is automatically reflected in the clarification detection logic.
 KNOWN_BRANDS = {
-    "westside", "myntra", "nykaa", "ajio", "flipkart",
-}
-ANALYSIS_HINTS = {
-    "trend", "trends", "discount", "discounts", "offer", "offers",
-    "competitor", "competitors", "category", "categories", "pricing",
-    "price", "market", "strategy", "recommend", "recommendation",
-    "promotions", "promotion", "analyze", "analysis", "compare",
-}
+    CLIENT_BRAND.lower(),
+} | {name.lower() for name in COMPETITOR_SITES.keys()}
 
 
 def _normalize_words(query: str) -> set[str]:
@@ -54,7 +59,23 @@ def _needs_clarification(query: str) -> bool:
     words = _normalize_words(query)
     has_analysis_intent = bool(words & ANALYSIS_HINTS)
     has_context_entity = bool(words & KNOWN_CATEGORIES) or bool(words & KNOWN_BRANDS)
+    is_all_category_trend_request = (
+        {"category", "categories"} & words
+        and {"trend", "trends"} & words
+    )
+    if is_all_category_trend_request:
+        return False
     return has_analysis_intent and not has_context_entity
+
+
+def _history_to_messages(history: list[dict] | None) -> list[dict]:
+    messages = []
+    for item in history or []:
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            messages.append({"role": role, "content": content})
+    return messages
 
 class TokenUsageCallback(BaseCallbackHandler):
     """Tracks per-call and cumulative LLM token usage across an agent loop."""
@@ -136,23 +157,25 @@ class InsightsAgentService:
     def __init__(self):
         try:
             self.llm = ChatGroq(
-                model="llama-3.3-70b-versatile",
+                model=GROQ_MODEL,
                 api_key=GROQ_API_KEY,
-                temperature=0.0,
+                temperature=GROQ_TEMPERATURE,
             )
-            self.tools = [get_category_trends, get_top_competitors, get_active_offers]
+            self.tools = [get_category_trends, get_top_competitors, get_active_offers, get_recommendation]
             
-            system_prompt = """You are Westside's Lead Pricing Strategist and Market Intelligence Assistant.
+            system_prompt = f"""You are {CLIENT_BRAND}'s Lead Pricing Strategist and Market Intelligence Assistant.
 You help the marketing and pricing teams analyze competitor promotions and make strategic decisions.
 1. Use the provided tools only for data-backed questions about promotions, discounts, categories, brands, or competitors.
 2. If the user is greeting you, greeting back is enough. Do not use tools.
-3. If the user asks an analysis question but does not specify a brand or category, ask a short clarifying question. Do not guess.
+3. If the user asks an analysis question but does not specify a brand or category, ask a short clarifying question. Do not guess. Exception: if they ask for category trends in general, use get_category_trends with no category filter.
 4. Never invent a category, brand, offer, or numerical value to make a tool call.
 5. Do not mix results from unrelated categories or brands into one recommendation.
-6. Use get_active_offers only when the user explicitly asks for exact offers for a specific brand, or when listing examples for that same brand.
-2. We are "Westside". Discuss internal data as Westside's promotions.
-3. Be specific. Mention exact percentages, rupees, and brand names.
-4. Provide actionable insights based on the numerical gaps between us and competitors."""
+6. When the user asks what we should do, what we can do, or asks for a recommendation, always call get_recommendation for the specific competitor and category before answering — even if {CLIENT_BRAND} internal data may be missing. The tool handles missing internal data gracefully and will tell you what to say.
+7. When the question is category-specific, always keep tool scope aligned to that category.
+8. Use get_active_offers only when the user explicitly asks for exact offers for a specific brand, or when listing examples for that same brand and category.
+9. We are "{CLIENT_BRAND}". Discuss internal data as {CLIENT_BRAND}'s promotions.
+10. Be specific. Mention exact percentages, rupees, and brand names.
+11. Provide actionable insights based on the numerical gaps between us and competitors."""
 
             # Using Langchain create_agent with LangGraph MemorySaver
             self.memory = MemorySaver()
@@ -165,14 +188,14 @@ You help the marketing and pricing teams analyze competitor promotions and make 
             
             logger.info(
                 "Insights Agent Service initialized successfully | model=%s | tools=%s",
-                "llama-3.3-70b-versatile",
+                GROQ_MODEL,
                 [tool.name for tool in self.tools],
             )
         except Exception as e:
             logger.error(f"Failed to initialize agent service: {str(e)}")
             self.graph = None
 
-    def generate_response(self, query: str, session_id: str) -> str:
+    def generate_response(self, query: str, session_id: str, history: list[dict] | None = None) -> str:
         if not self.graph:
             return "I apologize, but my intelligence engine is currently uninitialized."
 
@@ -182,9 +205,10 @@ You help the marketing and pricing teams analyze competitor promotions and make 
             t0 = time.perf_counter()
             token_cb = TokenUsageCallback()
             logger.info(
-                "Agent run starting | session_id=%s | query=%r",
+                "Agent run starting | session_id=%s | query=%r | history_items=%d",
                 session_id,
                 query,
+                len(history or []),
             )
 
             if _is_greeting(query):
@@ -192,7 +216,7 @@ You help the marketing and pricing teams analyze competitor promotions and make 
                     "Greeting detected | session_id=%s | bypassing agent/tools",
                     session_id,
                 )
-                return "Hello! I can help analyze competitor promotions, category trends, and Westside offers. Ask me about a specific brand or category to get started."
+                return f"Hello! I can help analyze competitor promotions, category trends, and {CLIENT_BRAND} offers. Ask me about a specific brand or category to get started."
 
             if _needs_clarification(query):
                 logger.info(
@@ -200,9 +224,11 @@ You help the marketing and pricing teams analyze competitor promotions and make 
                     session_id,
                     query,
                 )
-                return "Which brand or category should I analyze? For example: Westside, Myntra, Nykaa, or a category like Fashion, Beauty, or Electronics."
+                return f"Which brand or category should I analyze? For example: {CLIENT_BRAND}, Myntra, Nykaa, or a category like Fashion, Beauty, or Electronics."
             
-            inputs = {"messages": [{"role": "user", "content": query}]}
+            messages = _history_to_messages(history)
+            messages.append({"role": "user", "content": query})
+            inputs = {"messages": messages}
             config = {
                 "configurable": {"thread_id": session_id},
                 "callbacks": [token_cb]
