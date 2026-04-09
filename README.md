@@ -51,10 +51,11 @@ Internal MySQL Connector            ✅ connectors/mysql_fetcher.py + transforme
 
 ### Conversational Analysis
 - FastAPI chat endpoint at `/api/chat`
-- LangGraph/LangChain agent using PostgreSQL-backed tools
+- LangChain agent using PostgreSQL-backed tools
 - Greeting bypass to avoid unnecessary tool/LLM usage
 - Clarification flow when a query is too vague
-- Per-session chat threads via Streamlit-generated `session_id`
+- Per-session chat context via Streamlit-generated `session_id`
+- Recent chat history is sent with each request and capped for token control
 - Detailed backend terminal logging for request flow, tool selection, SQL activity, and final responses
 
 ### Insights Dashboard
@@ -68,6 +69,7 @@ Internal MySQL Connector            ✅ connectors/mysql_fetcher.py + transforme
 ### Recommendation Logic
 - Deterministic `get_recommendation(category, competitor)` tool
 - Category-aware `get_active_offers(brand, category, limit)` tool
+- Recommendation output includes urgency, discount-gap reasoning, tactic selection, and supporting offer examples
 - Configurable limits for active offers and top competitors
 
 ---
@@ -124,7 +126,7 @@ AI_Promotional_POC/
 | Scraping | `firecrawl-py` |
 | Extraction LLM | `groq` |
 | Agent LLM | `langchain-groq` |
-| Agent Orchestration | `langchain` + `langgraph` |
+| Agent Orchestration | `langchain` |
 | Validation | `pydantic` |
 | Deduplication | `rapidfuzz` |
 | Retries | `tenacity` |
@@ -147,6 +149,8 @@ DATABASE_URL=postgresql://user:password@localhost:5432/promo_db
 CLIENT_BRAND=YourBrandName         # e.g. Westside, Fabindia, H&M — drives all UI labels and agent persona
 DEFAULT_TOP_COMPETITORS_LIMIT=5
 DEFAULT_ACTIVE_OFFERS_LIMIT=5
+CHAT_HISTORY_WINDOW=4
+MAX_HISTORY_TURNS=6
 API_URL=http://127.0.0.1:8000/api/chat
 
 # PostgreSQL Pool
@@ -279,6 +283,9 @@ coupon_code, user_type, valid_until
 - field validation
 - category normalization
 - fuzzy deduplication
+- null cleanup (`"NULL"` → real nulls)
+- `valid_until` normalization from relative/text values to ISO dates where possible
+- basic promo-type correction for obvious extraction mistakes
 - output shaping into a clean provider payload
 
 ### Layer 3 — Database
@@ -286,6 +293,7 @@ coupon_code, user_type, valid_until
 - loads internal data into `internal_promotions`
 - keeps competitor loads idempotent
 - uses PostgreSQL connection pooling
+- stores `valid_until` as a SQL `DATE`
 
 ### Layer 4–5 — Insights and Recommendations
 
@@ -298,7 +306,7 @@ Current tools in `insights/tools.py`:
 ### Layer 6–8 — API, Dashboard, and Chat
 - FastAPI backend exposes the chat endpoint
 - Streamlit shows both dashboard and chatbot
-- Chat agent uses session-specific threads
+- Chat agent receives recent capped history on each request
 - Logging shows request flow, tool usage, SQL activity, and output previews in the backend terminal
 
 ---
@@ -309,6 +317,7 @@ The chat agent is designed to be safer and more scoped than the initial version:
 
 - greetings do not trigger tools
 - vague analytical questions trigger a clarification request
+- recent history is replayed into each request with a cap to control token growth
 - category-specific questions should keep tool scope aligned to that category
 - recommendation-style questions should route through the deterministic recommendation tool
 - category-aware brand offer retrieval prevents mixing unrelated categories in one answer
@@ -354,8 +363,8 @@ COMPETITOR_SITES = {
 ## Known Gaps
 
 These are still open and worth prioritizing next:
-- `valid_until` is still stored as text, not a proper SQL date type
 - internal recommendations depend on `internal_promotions` being populated
+- recommendation logic is still discount-gap based; it is not yet margin- or cost-aware
 - competitiveness scoring is not built yet
 - alerts are not built yet
 - impact simulation is not built yet

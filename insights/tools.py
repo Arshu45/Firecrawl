@@ -47,6 +47,12 @@ def _top_offer_examples(rows: list[dict], limit: int = TOOL_SUMMARY_TOP_OFFERS) 
     return examples
 
 
+def _example_limit(requested_limit: int | None = None) -> int:
+    if requested_limit is None:
+        return max(TOOL_SUMMARY_TOP_OFFERS, 5)
+    return max(TOOL_SUMMARY_TOP_OFFERS, min(requested_limit, 5))
+
+
 def _promo_type_breakdown(rows: list[dict]) -> dict[str, int]:
     breakdown: dict[str, int] = {}
     for row in rows:
@@ -64,7 +70,20 @@ def _coerce_float(value):
 @tool
 def get_category_trends(category: str | None = None) -> str:
     """
-    Returns discount trends for a specific category, or for all categories when category is omitted.
+    Use this for OBSERVATION questions about market trends and category overviews.
+
+    Call with no category when the user asks for an overall market view.
+    Call with a specific category when the user asks about one category only.
+
+    Trigger phrases: "what's happening in", "category trends", "how is the market",
+    "overview", "what's the average discount", "compare across categories",
+    "all categories", "for all".
+
+    IMPORTANT: After this tool returns, stop. Do not call get_active_offers or
+    get_recommendation per category unless the user explicitly asks for more detail
+    in the same message.
+
+    Do NOT use this for strategy questions — use get_recommendation for those.
     """
     category = _normalize_category(category)
     logger.info("Tool get_category_trends called | category=%s", category)
@@ -131,13 +150,14 @@ def get_category_trends(category: str | None = None) -> str:
                 """,
                 (CLIENT_BRAND, category, category),
             )
+
     logger.info(
         "Tool get_category_trends DB rows fetched | category=%s | row_count=%d | preview=%s",
         category,
         len(rows),
         _truncate(rows),
     )
-    
+
     if not rows:
         if category is None:
             return "No category trend data found."
@@ -186,11 +206,18 @@ def get_category_trends(category: str | None = None) -> str:
 @tool
 def get_top_competitors(category: str, limit: int = DEFAULT_TOP_COMPETITORS_LIMIT) -> str:
     """
-    Use this only when a specific category is explicitly known from the user request.
-    Returns which competitors are giving the deepest discounts in that exact category.
+    Use this when the user wants to know which competitors are most aggressive
+    in a specific category.
+
+    Trigger phrases: "who is leading in", "top competitors in", "most aggressive in",
+    "deepest discounts in", "who is ahead in".
+
+    Requires a specific category. Do not call without one.
+    Do NOT use this for strategy questions — use get_recommendation for those.
     """
     category = category.strip().title()
     logger.info("Tool get_top_competitors called | category=%s | limit=%s", category, limit)
+
     query = """
     SELECT 
         c.name as competitor, 
@@ -205,16 +232,17 @@ def get_top_competitors(category: str, limit: int = DEFAULT_TOP_COMPETITORS_LIMI
     ORDER BY deepest_discount DESC
     LIMIT %s
     """
-    
+
     with DBClient() as db:
         rows = db.execute(query, (category, limit))
+
     logger.info(
         "Tool get_top_competitors DB rows fetched | category=%s | row_count=%d | preview=%s",
         category,
         len(rows),
         _truncate(rows),
     )
-    
+
     if not rows:
         return f"No competitor discounts found for category: {category}."
 
@@ -242,8 +270,18 @@ def get_active_offers(
     limit: int = DEFAULT_ACTIVE_OFFERS_LIMIT,
 ) -> str:
     """
-    Use this only when the user explicitly asks for the exact offers of a specific brand.
-    When the user asks about a category-specific question, always pass the category too.
+    Use this when the user wants to SEE or LIST specific offers from a brand.
+
+    Trigger phrases: "show me", "list", "what offers", "give me examples",
+    "what are they running", "show concrete offers", "active offers".
+
+    Always pass category when the question is category-specific.
+    Do NOT call this for strategy questions — use get_recommendation instead.
+    Do NOT call this automatically after get_category_trends or get_recommendation
+    unless the user explicitly asked for offer examples.
+
+    When this tool is called, your response MUST lead with the actual offer list.
+    Do not replace the offer list with a recommendation summary.
     """
     brand = brand.strip()
     category = _normalize_category(category)
@@ -253,7 +291,7 @@ def get_active_offers(
         category,
         limit,
     )
-    
+
     if brand.lower() == CLIENT_BRAND.lower():
         query = """
         SELECT offer_title, category, promo_type, discount_max, valid_until
@@ -276,22 +314,27 @@ def get_active_offers(
         LIMIT %s
         """
         params = (brand, category, category, limit)
-        
+
     with DBClient() as db:
         rows = db.execute(query, params)
+
     logger.info(
         "Tool get_active_offers DB rows fetched | brand=%s | row_count=%d | preview=%s",
         brand,
         len(rows),
         _truncate(rows),
     )
-        
+
     if not rows:
         if category:
             return f"No active offers found for brand: {brand} in {category}."
         return f"No active offers found for brand: {brand}."
 
-    discounts = [float(row["discount_max"]) for row in rows if row.get("discount_max") is not None]
+    discounts = [
+        float(row["discount_max"])
+        for row in rows
+        if row.get("discount_max") is not None
+    ]
     payload = {
         "brand": brand,
         "category": category,
@@ -299,7 +342,7 @@ def get_active_offers(
         "avg_discount": round(sum(discounts) / len(discounts), 2) if discounts else None,
         "max_discount": max(discounts) if discounts else None,
         "promo_type_breakdown": _promo_type_breakdown(rows),
-        "top_offers": _top_offer_examples(rows, limit=min(limit, max(TOOL_SUMMARY_TOP_OFFERS, 5))),
+        "top_offers": _top_offer_examples(rows, limit=_example_limit(limit)),
     }
     result = _serialize_payload(payload)
     logger.info("Tool get_active_offers returning | payload=%s", _truncate(result))
@@ -309,8 +352,19 @@ def get_active_offers(
 @tool
 def get_recommendation(category: str, competitor: str) -> str:
     """
-    Use this when the user asks what Westside should do against a competitor in a specific category.
-    This is a deterministic recommendation tool, not freeform LLM advice.
+    Use this ONLY for STRATEGY questions — when the user wants to know how
+    to respond to a competitor or what action to take.
+
+    Trigger phrases: "what should we do", "how do we respond", "what can we do",
+    "recommend a response", "give me a strategy", "how do we compete",
+    "what's our move", "respond to", "counter", "react to".
+
+    Always call this before giving any strategic advice.
+    Requires both competitor name and category.
+
+    Do NOT call this for observation questions ("what is X doing") —
+    use get_active_offers or get_category_trends for those.
+    Do NOT call this automatically after get_category_trends.
     """
     category = _normalize_category(category)
     competitor = competitor.strip()
@@ -359,7 +413,9 @@ def get_recommendation(category: str, competitor: str) -> str:
     """
 
     with DBClient() as db:
-        row = db.execute_one(stats_query, (competitor, category, category, CLIENT_BRAND))
+        row = db.execute_one(
+            stats_query, (competitor, category, category, CLIENT_BRAND)
+        )
         competitor_offer_rows = db.execute(
             """
             SELECT p.offer_title, p.category, p.promo_type, p.discount_max, p.flat_value, p.valid_until
@@ -371,7 +427,7 @@ def get_recommendation(category: str, competitor: str) -> str:
             ORDER BY p.discount_max DESC NULLS LAST, p.flat_value DESC NULLS LAST, p.offer_title
             LIMIT %s
             """,
-            (competitor, category, max(DEFAULT_ACTIVE_OFFERS_LIMIT, 5)),
+            (competitor, category, DEFAULT_ACTIVE_OFFERS_LIMIT),
         )
         internal_offer_rows = db.execute(
             """
@@ -382,7 +438,7 @@ def get_recommendation(category: str, competitor: str) -> str:
             ORDER BY discount_max DESC NULLS LAST, flat_value DESC NULLS LAST, offer_title
             LIMIT %s
             """,
-            (category, max(DEFAULT_ACTIVE_OFFERS_LIMIT, 5)),
+            (category, DEFAULT_ACTIVE_OFFERS_LIMIT),
         )
 
     logger.info("Tool get_recommendation DB row fetched | row=%s", _truncate(row))
@@ -415,8 +471,14 @@ def get_recommendation(category: str, competitor: str) -> str:
             "status": "missing_internal_data",
             "category": category,
             "competitor": competitor,
-            "recommendation": f"Populate {CLIENT_BRAND}'s internal promotions for {category} before making a pricing move.",
-            "reason": f"{CLIENT_BRAND} has no active comparable offers in {category}, so any recommendation would be one-sided.",
+            "recommendation": (
+                f"Populate {CLIENT_BRAND}'s internal promotions for {category} "
+                f"before making a pricing move."
+            ),
+            "reason": (
+                f"{CLIENT_BRAND} has no active comparable offers in {category}, "
+                f"so any recommendation would be one-sided."
+            ),
             "urgency": "high",
             "competitor_context": {
                 "active_offer_count": competitor_active_offer_count,
@@ -424,7 +486,7 @@ def get_recommendation(category: str, competitor: str) -> str:
                 "avg_discount": competitor_avg,
                 "deepest_discount": competitor_deepest,
                 "promo_type_breakdown": competitor_breakdown,
-                "top_offers": _top_offer_examples(competitor_offer_rows),
+                "top_offers": _top_offer_examples(competitor_offer_rows, limit=_example_limit()),
             },
         }
         payload = _serialize_payload(result)
@@ -436,28 +498,57 @@ def get_recommendation(category: str, competitor: str) -> str:
 
     if avg_gap >= 15 or deepest_gap >= 20:
         urgency = "high"
-        action = f"Launch a targeted {category} response this week. Close most of the gap with a focused discount or bundle, not a sitewide markdown."
-        target_discount_range = [max(0, round(competitor_avg - 5, 2)), round(competitor_avg, 2)]
+        action = (
+            f"Launch a targeted {category} response this week. "
+            f"Close most of the gap with a focused discount or bundle, not a sitewide markdown."
+        )
+        target_discount_range = [
+            max(0, round(competitor_avg - 5, 2)),
+            round(competitor_avg, 2),
+        ]
     elif avg_gap >= 5 or deepest_gap >= 10:
         urgency = "medium"
-        action = "Narrow part of the gap with a measured discount or bundle, then monitor competitor moves before expanding."
-        target_discount_range = [max(0, round(competitor_avg - 10, 2)), max(0, round(competitor_avg - 5, 2))]
+        action = (
+            "Narrow part of the gap with a measured discount or bundle, "
+            "then monitor competitor moves before expanding."
+        )
+        target_discount_range = [
+            max(0, round(competitor_avg - 10, 2)),
+            max(0, round(competitor_avg - 5, 2)),
+        ]
     else:
         urgency = "low"
-        action = "Do not aggressively match. Keep pricing steady and differentiate with bundles, merchandising, or limited-time offers."
-        target_discount_range = [round(internal_avg, 2), round(max(internal_avg, competitor_avg or internal_avg), 2)]
+        action = (
+            "Do not aggressively match. Keep pricing steady and differentiate "
+            "with bundles, merchandising, or limited-time offers."
+        )
+        target_discount_range = [
+            round(internal_avg, 2),
+            round(max(internal_avg, competitor_avg or internal_avg), 2),
+        ]
 
     competitor_has_bundles = competitor_breakdown.get("bundle", 0) > 0
     competitor_has_flat = competitor_breakdown.get("flat", 0) > 0
+
     if competitor_has_bundles:
         recommended_tactic = "bundle"
-        tactic_reason = f"{competitor} is already using bundle-style promotions in {category}, so a bundle or add-on offer is a safer way to respond than a blanket markdown."
+        tactic_reason = (
+            f"{competitor} is already using bundle-style promotions in {category}, "
+            f"so a bundle or add-on offer is a safer way to respond than a blanket markdown."
+        )
     elif competitor_has_flat:
         recommended_tactic = "targeted_discount"
-        tactic_reason = f"{competitor} is mixing flat-value offers with percentage discounts in {category}, so a targeted discount paired with a threshold offer is more comparable than a generic sale banner."
+        tactic_reason = (
+            f"{competitor} is mixing flat-value offers with percentage discounts in {category}, "
+            f"so a targeted discount paired with a threshold offer is more comparable "
+            f"than a generic sale banner."
+        )
     else:
         recommended_tactic = "percentage_discount"
-        tactic_reason = f"{competitor} is mostly competing on straight discounts in {category}, so a clean category discount is the clearest response."
+        tactic_reason = (
+            f"{competitor} is mostly competing on straight discounts in {category}, "
+            f"so a clean category discount is the clearest response."
+        )
 
     result = {
         "status": "ok",
@@ -470,19 +561,22 @@ def get_recommendation(category: str, competitor: str) -> str:
         "competitor_active_offer_count": competitor_active_offer_count,
         "competitor_quantified_offer_count": competitor_quantified_offer_count,
         "competitor_promo_type_breakdown": competitor_breakdown,
-        "competitor_top_offers": _top_offer_examples(competitor_offer_rows),
+        "competitor_top_offers": _top_offer_examples(competitor_offer_rows, limit=_example_limit()),
         "internal_avg_discount": internal_avg,
         "internal_deepest_discount": internal_deepest,
         "internal_active_offer_count": internal_active_offer_count,
         "internal_promo_type_breakdown": internal_breakdown,
-        "internal_top_offers": _top_offer_examples(internal_offer_rows),
+        "internal_top_offers": _top_offer_examples(internal_offer_rows, limit=_example_limit()),
         "avg_gap": avg_gap,
         "deepest_gap": deepest_gap,
         "recommended_tactic": recommended_tactic,
         "target_discount_range": target_discount_range,
         "recommendation": action,
         "tactic_reason": tactic_reason,
-        "reason": f"{competitor} is ahead of {CLIENT_BRAND} by {avg_gap}% on average discount and {deepest_gap}% at the deepest discount point in {category}.",
+        "reason": (
+            f"{competitor} is ahead of {CLIENT_BRAND} by {avg_gap}% on average discount "
+            f"and {deepest_gap}% at the deepest discount point in {category}."
+        ),
     }
     payload = _serialize_payload(result)
     logger.info("Tool get_recommendation returning | payload=%s", _truncate(payload))
