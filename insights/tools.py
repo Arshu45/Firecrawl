@@ -1,17 +1,29 @@
 import json
 import logging
 
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
+from pydantic import BaseModel
 
 from database.db_client import DBClient
 from config.settings import (
     CLIENT_BRAND,
     DEFAULT_ACTIVE_OFFERS_LIMIT,
     DEFAULT_TOP_COMPETITORS_LIMIT,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_TEMPERATURE,
     TOOL_SUMMARY_TOP_OFFERS,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class RecommendationExplanation(BaseModel):
+    situation: str
+    action: str
+    why: str
 
 
 def _truncate(value, limit: int = 500) -> str:
@@ -38,6 +50,7 @@ def _top_offer_examples(rows: list[dict], limit: int = TOOL_SUMMARY_TOP_OFFERS) 
         examples.append(
             {
                 "offer_title": row.get("offer_title"),
+                "description": row.get("description"),
                 "category": row.get("category"),
                 "promo_type": row.get("promo_type"),
                 "discount_max": row.get("discount_max"),
@@ -65,6 +78,186 @@ def _coerce_float(value):
     if value is None:
         return None
     return float(value)
+
+
+def _format_offer_examples(rows: list[dict]) -> str:
+    if not rows:
+        return "No offer examples available."
+
+    lines = []
+    for row in rows[:_example_limit()]:
+        title = row.get("offer_title") or "Untitled offer"
+        description = row.get("description") or "No description"
+        promo_type = row.get("promo_type") or "other"
+        discount = row.get("discount_max")
+        discount_text = f"{discount}%" if discount is not None else "unknown discount"
+        lines.append(
+            f"- {title} | {description} | promo_type={promo_type} | discount_max={discount_text}"
+        )
+    return "\n".join(lines)
+
+
+def _generate_why_explanation(
+    *,
+    category: str,
+    competitor: str,
+    competitor_avg: float | None,
+    competitor_deepest: float | None,
+    competitor_active_offer_count: int,
+    competitor_breakdown: dict[str, int],
+    competitor_top_offers: list[dict],
+    internal_avg: float | None,
+    internal_deepest: float | None,
+    internal_active_offer_count: int,
+    internal_breakdown: dict[str, int],
+    internal_top_offers: list[dict],
+    avg_gap: float,
+    deepest_gap: float,
+) -> RecommendationExplanation:
+    llm = ChatGroq(
+        model=GROQ_MODEL,
+        api_key=GROQ_API_KEY,
+        temperature=GROQ_TEMPERATURE,
+    )
+    structured_llm = llm.with_structured_output(RecommendationExplanation)
+    competitor_breakdown_text = json.dumps(competitor_breakdown, default=str)
+    internal_breakdown_text = json.dumps(internal_breakdown, default=str)
+    competitor_offers_text = _format_offer_examples(competitor_top_offers)
+    internal_offers_text = _format_offer_examples(internal_top_offers)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                (
+                    f"You are {CLIENT_BRAND}'s pricing strategist. "
+                    "Return exactly three concise fields: situation, action, and why. "
+                    "Situation must summarize competitor activity and the exact gap versus us. "
+                    "Action must recommend a specific offer construct, discount range when justified, "
+                    "and timeframe. "
+                    "Why must be exactly one sentence and reference the competitor's actual promo mix. "
+                    "Do not use markdown bullets or labels in the field values."
+                ),
+            ),
+            (
+                "human",
+                (
+                    "Use this evidence to create the recommendation explanation.\n\n"
+                    "Category: {category}\n"
+                    "Competitor: {competitor}\n"
+                    "Client brand: {client_brand}\n\n"
+                    "Competitor avg discount: {competitor_avg}\n"
+                    "Competitor deepest discount: {competitor_deepest}\n"
+                    "Competitor active offer count: {competitor_active_offer_count}\n"
+                    "Competitor promo type breakdown: {competitor_breakdown_text}\n"
+                    "Competitor top offers:\n{competitor_offers_text}\n\n"
+                    "{client_brand} avg discount: {internal_avg}\n"
+                    "{client_brand} deepest discount: {internal_deepest}\n"
+                    "{client_brand} active offer count: {internal_active_offer_count}\n"
+                    "{client_brand} promo type breakdown: {internal_breakdown_text}\n"
+                    "{client_brand} top offers:\n{internal_offers_text}\n\n"
+                    "Average discount gap: {avg_gap}\n"
+                    "Deepest discount gap: {deepest_gap}\n"
+                ),
+            ),
+        ]
+    )
+    return structured_llm.invoke(
+        prompt.invoke(
+            {
+                "category": category,
+                "competitor": competitor,
+                "client_brand": CLIENT_BRAND,
+                "competitor_avg": competitor_avg,
+                "competitor_deepest": competitor_deepest,
+                "competitor_active_offer_count": competitor_active_offer_count,
+                "competitor_breakdown_text": competitor_breakdown_text,
+                "competitor_offers_text": competitor_offers_text,
+                "internal_avg": internal_avg,
+                "internal_deepest": internal_deepest,
+                "internal_active_offer_count": internal_active_offer_count,
+                "internal_breakdown_text": internal_breakdown_text,
+                "internal_offers_text": internal_offers_text,
+                "avg_gap": avg_gap,
+                "deepest_gap": deepest_gap,
+            }
+        )
+    )
+
+
+def _generate_market_why_explanation(
+    *,
+    category: str,
+    competitor_summary_text: str,
+    competitor_offer_examples_text: str,
+    internal_avg: float | None,
+    internal_deepest: float | None,
+    internal_active_offer_count: int,
+    internal_breakdown: dict[str, int],
+    internal_top_offers: list[dict],
+    common_promo_types: list[str],
+    avg_competitor_discount: float | None,
+    deepest_competitor_discount: float | None,
+) -> RecommendationExplanation:
+    llm = ChatGroq(
+        model=GROQ_MODEL,
+        api_key=GROQ_API_KEY,
+        temperature=GROQ_TEMPERATURE,
+    )
+    structured_llm = llm.with_structured_output(RecommendationExplanation)
+    internal_breakdown_text = json.dumps(internal_breakdown, default=str)
+    internal_offers_text = _format_offer_examples(internal_top_offers)
+    common_promo_types_text = ", ".join(common_promo_types) if common_promo_types else "none identified"
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                (
+                    f"You are {CLIENT_BRAND}'s pricing strategist. "
+                    "Return exactly three concise fields: situation, action, and why. "
+                    "Situation must summarize what multiple competitors are doing in the category and how that compares to us. "
+                    "Action must recommend one accumulated response for the category, with a concrete offer construct and timeframe. "
+                    "Why must be exactly one sentence and reference the common competitor promo pattern. "
+                    "Do not use markdown bullets or labels in the field values."
+                ),
+            ),
+            (
+                "human",
+                (
+                    "Create one market-wide strategy recommendation from this evidence.\n\n"
+                    "Category: {category}\n"
+                    "Client brand: {client_brand}\n"
+                    "Competitor summary:\n{competitor_summary_text}\n\n"
+                    "Competitor offer examples:\n{competitor_offer_examples_text}\n\n"
+                    "Common competitor promo types: {common_promo_types_text}\n"
+                    "Average competitor discount across brands: {avg_competitor_discount}\n"
+                    "Deepest competitor discount across brands: {deepest_competitor_discount}\n\n"
+                    "{client_brand} avg discount: {internal_avg}\n"
+                    "{client_brand} deepest discount: {internal_deepest}\n"
+                    "{client_brand} active offer count: {internal_active_offer_count}\n"
+                    "{client_brand} promo type breakdown: {internal_breakdown_text}\n"
+                    "{client_brand} top offers:\n{internal_offers_text}\n"
+                ),
+            ),
+        ]
+    )
+    return structured_llm.invoke(
+        prompt.invoke(
+            {
+                "category": category,
+                "client_brand": CLIENT_BRAND,
+                "competitor_summary_text": competitor_summary_text,
+                "competitor_offer_examples_text": competitor_offer_examples_text,
+                "common_promo_types_text": common_promo_types_text,
+                "avg_competitor_discount": avg_competitor_discount,
+                "deepest_competitor_discount": deepest_competitor_discount,
+                "internal_avg": internal_avg,
+                "internal_deepest": internal_deepest,
+                "internal_active_offer_count": internal_active_offer_count,
+                "internal_breakdown_text": internal_breakdown_text,
+                "internal_offers_text": internal_offers_text,
+            }
+        )
+    )
 
 
 @tool
@@ -294,7 +487,7 @@ def get_active_offers(
 
     if brand.lower() == CLIENT_BRAND.lower():
         query = """
-        SELECT offer_title, category, promo_type, discount_max, valid_until
+        SELECT offer_title, description, category, promo_type, discount_max, valid_until
         FROM internal_promotions
         WHERE (valid_until IS NULL OR valid_until >= CURRENT_DATE)
           AND (%s IS NULL OR category = %s)
@@ -304,7 +497,7 @@ def get_active_offers(
         params = (category, category, limit)
     else:
         query = """
-        SELECT p.offer_title, p.category, p.promo_type, p.discount_max, p.valid_until
+        SELECT p.offer_title, p.description, p.category, p.promo_type, p.discount_max, p.valid_until
         FROM promotions p
         JOIN competitors c ON p.competitor_id = c.id
         WHERE c.name ILIKE %s
@@ -365,6 +558,9 @@ def get_recommendation(category: str, competitor: str) -> str:
     Do NOT call this for observation questions ("what is X doing") —
     use get_active_offers or get_category_trends for those.
     Do NOT call this automatically after get_category_trends.
+
+    This tool returns structured evidence only. It does not generate the final
+    strategy text. The LLM should synthesize the recommendation from the facts.
     """
     category = _normalize_category(category)
     competitor = competitor.strip()
@@ -418,7 +614,7 @@ def get_recommendation(category: str, competitor: str) -> str:
         )
         competitor_offer_rows = db.execute(
             """
-            SELECT p.offer_title, p.category, p.promo_type, p.discount_max, p.flat_value, p.valid_until
+            SELECT p.offer_title, p.description, p.category, p.promo_type, p.discount_max, p.flat_value, p.valid_until
             FROM promotions p
             JOIN competitors c ON p.competitor_id = c.id
             WHERE c.name ILIKE %s
@@ -431,7 +627,7 @@ def get_recommendation(category: str, competitor: str) -> str:
         )
         internal_offer_rows = db.execute(
             """
-            SELECT offer_title, category, promo_type, discount_max, flat_value, valid_until
+            SELECT offer_title, description, category, promo_type, discount_max, flat_value, valid_until
             FROM internal_promotions
             WHERE category = %s
               AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
@@ -448,7 +644,6 @@ def get_recommendation(category: str, competitor: str) -> str:
             "status": "missing_competitor_data",
             "category": category,
             "competitor": competitor,
-            "recommendation": f"No competitor data found for {competitor} in {category}.",
             "reason": "There is no category-level competitor data to compare yet.",
         }
         payload = _serialize_payload(result)
@@ -471,15 +666,11 @@ def get_recommendation(category: str, competitor: str) -> str:
             "status": "missing_internal_data",
             "category": category,
             "competitor": competitor,
-            "recommendation": (
-                f"Populate {CLIENT_BRAND}'s internal promotions for {category} "
-                f"before making a pricing move."
-            ),
             "reason": (
                 f"{CLIENT_BRAND} has no active comparable offers in {category}, "
                 f"so any recommendation would be one-sided."
             ),
-            "urgency": "high",
+            "client_brand": CLIENT_BRAND,
             "competitor_context": {
                 "active_offer_count": competitor_active_offer_count,
                 "quantified_offer_count": competitor_quantified_offer_count,
@@ -495,84 +686,46 @@ def get_recommendation(category: str, competitor: str) -> str:
 
     avg_gap = round((competitor_avg or 0) - internal_avg, 2)
     deepest_gap = round((competitor_deepest or 0) - (internal_deepest or 0), 2)
-
-    if avg_gap >= 15 or deepest_gap >= 20:
-        urgency = "high"
-        action = (
-            f"Launch a targeted {category} response this week. "
-            f"Close most of the gap with a focused discount or bundle, not a sitewide markdown."
-        )
-        target_discount_range = [
-            max(0, round(competitor_avg - 5, 2)),
-            round(competitor_avg, 2),
-        ]
-    elif avg_gap >= 5 or deepest_gap >= 10:
-        urgency = "medium"
-        action = (
-            "Narrow part of the gap with a measured discount or bundle, "
-            "then monitor competitor moves before expanding."
-        )
-        target_discount_range = [
-            max(0, round(competitor_avg - 10, 2)),
-            max(0, round(competitor_avg - 5, 2)),
-        ]
-    else:
-        urgency = "low"
-        action = (
-            "Do not aggressively match. Keep pricing steady and differentiate "
-            "with bundles, merchandising, or limited-time offers."
-        )
-        target_discount_range = [
-            round(internal_avg, 2),
-            round(max(internal_avg, competitor_avg or internal_avg), 2),
-        ]
-
-    competitor_has_bundles = competitor_breakdown.get("bundle", 0) > 0
-    competitor_has_flat = competitor_breakdown.get("flat", 0) > 0
-
-    if competitor_has_bundles:
-        recommended_tactic = "bundle"
-        tactic_reason = (
-            f"{competitor} is already using bundle-style promotions in {category}, "
-            f"so a bundle or add-on offer is a safer way to respond than a blanket markdown."
-        )
-    elif competitor_has_flat:
-        recommended_tactic = "targeted_discount"
-        tactic_reason = (
-            f"{competitor} is mixing flat-value offers with percentage discounts in {category}, "
-            f"so a targeted discount paired with a threshold offer is more comparable "
-            f"than a generic sale banner."
-        )
-    else:
-        recommended_tactic = "percentage_discount"
-        tactic_reason = (
-            f"{competitor} is mostly competing on straight discounts in {category}, "
-            f"so a clean category discount is the clearest response."
-        )
+    competitor_top_offers = _top_offer_examples(competitor_offer_rows, limit=_example_limit())
+    internal_top_offers = _top_offer_examples(internal_offer_rows, limit=_example_limit())
+    explanation = _generate_why_explanation(
+        category=category,
+        competitor=competitor,
+        competitor_avg=competitor_avg,
+        competitor_deepest=competitor_deepest,
+        competitor_active_offer_count=competitor_active_offer_count,
+        competitor_breakdown=competitor_breakdown,
+        competitor_top_offers=competitor_top_offers,
+        internal_avg=internal_avg,
+        internal_deepest=internal_deepest,
+        internal_active_offer_count=internal_active_offer_count,
+        internal_breakdown=internal_breakdown,
+        internal_top_offers=internal_top_offers,
+        avg_gap=avg_gap,
+        deepest_gap=deepest_gap,
+    )
 
     result = {
         "status": "ok",
         "client_brand": CLIENT_BRAND,
         "category": category,
         "competitor": competitor,
-        "urgency": urgency,
         "competitor_avg_discount": competitor_avg,
         "competitor_deepest_discount": competitor_deepest,
         "competitor_active_offer_count": competitor_active_offer_count,
         "competitor_quantified_offer_count": competitor_quantified_offer_count,
         "competitor_promo_type_breakdown": competitor_breakdown,
-        "competitor_top_offers": _top_offer_examples(competitor_offer_rows, limit=_example_limit()),
+        "competitor_top_offers": competitor_top_offers,
         "internal_avg_discount": internal_avg,
         "internal_deepest_discount": internal_deepest,
         "internal_active_offer_count": internal_active_offer_count,
         "internal_promo_type_breakdown": internal_breakdown,
-        "internal_top_offers": _top_offer_examples(internal_offer_rows, limit=_example_limit()),
+        "internal_top_offers": internal_top_offers,
         "avg_gap": avg_gap,
         "deepest_gap": deepest_gap,
-        "recommended_tactic": recommended_tactic,
-        "target_discount_range": target_discount_range,
-        "recommendation": action,
-        "tactic_reason": tactic_reason,
+        "situation_line": explanation.situation,
+        "action_line": explanation.action,
+        "why_line": explanation.why,
         "reason": (
             f"{competitor} is ahead of {CLIENT_BRAND} by {avg_gap}% on average discount "
             f"and {deepest_gap}% at the deepest discount point in {category}."
@@ -580,4 +733,235 @@ def get_recommendation(category: str, competitor: str) -> str:
     }
     payload = _serialize_payload(result)
     logger.info("Tool get_recommendation returning | payload=%s", _truncate(payload))
+    return payload
+
+
+@tool
+def get_competitor_market_recommendation(category: str) -> str:
+    """
+    Use this for category-level strategy questions about all competitors together.
+
+    Trigger phrases: "our competitors", "competitors doing in", "what are competitors doing",
+    "what is the market doing and what can we do", "against competitors", "all competitors".
+
+    Requires a specific category. This tool returns an accumulated market view and
+    one category-wide recommendation for the client brand.
+    """
+    category = _normalize_category(category)
+    logger.info("Tool get_competitor_market_recommendation called | category=%s", category)
+
+    with DBClient() as db:
+        competitor_stats_rows = db.execute(
+            """
+            SELECT
+                c.name AS competitor,
+                ROUND(AVG(p.discount_max), 2) AS avg_discount,
+                MAX(p.discount_max) AS deepest_discount,
+                COUNT(*) AS active_offers
+            FROM promotions p
+            JOIN competitors c ON p.competitor_id = c.id
+            WHERE p.category = %s
+              AND p.discount_max IS NOT NULL
+              AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
+            GROUP BY c.name
+            ORDER BY avg_discount DESC NULLS LAST, deepest_discount DESC NULLS LAST
+            """,
+            (category,),
+        )
+        competitor_offer_rows = db.execute(
+            """
+            SELECT
+                c.name AS competitor,
+                p.offer_title,
+                p.description,
+                p.category,
+                p.promo_type,
+                p.discount_max,
+                p.flat_value,
+                p.valid_until
+            FROM promotions p
+            JOIN competitors c ON p.competitor_id = c.id
+            WHERE p.category = %s
+              AND (p.valid_until IS NULL OR p.valid_until >= CURRENT_DATE)
+            ORDER BY c.name, p.discount_max DESC NULLS LAST, p.flat_value DESC NULLS LAST, p.offer_title
+            """,
+            (category,),
+        )
+        internal_row = db.execute_one(
+            """
+            SELECT
+                ROUND(AVG(discount_max), 2) AS avg_discount,
+                MAX(discount_max) AS deepest_discount,
+                COUNT(*) AS active_offers
+            FROM internal_promotions
+            WHERE category = %s
+              AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
+              AND discount_max IS NOT NULL
+            """,
+            (category,),
+        )
+        internal_offer_rows = db.execute(
+            """
+            SELECT
+                offer_title,
+                description,
+                category,
+                promo_type,
+                discount_max,
+                flat_value,
+                valid_until
+            FROM internal_promotions
+            WHERE category = %s
+              AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
+            ORDER BY discount_max DESC NULLS LAST, flat_value DESC NULLS LAST, offer_title
+            LIMIT %s
+            """,
+            (category, DEFAULT_ACTIVE_OFFERS_LIMIT),
+        )
+
+    logger.info(
+        "Tool get_competitor_market_recommendation DB rows fetched | category=%s | competitors=%d | competitor_offer_rows=%d",
+        category,
+        len(competitor_stats_rows),
+        len(competitor_offer_rows),
+    )
+
+    if not competitor_stats_rows:
+        result = {
+            "status": "missing_competitor_data",
+            "category": category,
+            "reason": f"No competitor data found for category: {category}.",
+        }
+        payload = _serialize_payload(result)
+        logger.info(
+            "Tool get_competitor_market_recommendation returning | payload=%s",
+            _truncate(payload),
+        )
+        return payload
+
+    internal_avg = _coerce_float((internal_row or {}).get("avg_discount"))
+    internal_deepest = _coerce_float((internal_row or {}).get("deepest_discount"))
+    internal_active_offer_count = int((internal_row or {}).get("active_offers") or 0)
+    internal_breakdown = _promo_type_breakdown(internal_offer_rows)
+    internal_top_offers = _top_offer_examples(internal_offer_rows, limit=_example_limit())
+
+    if internal_avg is None:
+        result = {
+            "status": "missing_internal_data",
+            "category": category,
+            "client_brand": CLIENT_BRAND,
+            "reason": (
+                f"{CLIENT_BRAND} has no active comparable offers in {category}, "
+                "so a market-wide response cannot be benchmarked properly."
+            ),
+            "competitors": competitor_stats_rows,
+        }
+        payload = _serialize_payload(result)
+        logger.info(
+            "Tool get_competitor_market_recommendation returning | payload=%s",
+            _truncate(payload),
+        )
+        return payload
+
+    offers_by_competitor: dict[str, list[dict]] = {}
+    aggregate_breakdown: dict[str, int] = {}
+    for row in competitor_offer_rows:
+        competitor_name = row.get("competitor") or "Unknown"
+        offers_by_competitor.setdefault(competitor_name, []).append(row)
+        promo_type = row.get("promo_type") or "other"
+        aggregate_breakdown[promo_type] = aggregate_breakdown.get(promo_type, 0) + 1
+
+    competitors = []
+    summary_lines = []
+    example_lines = []
+    avg_values = []
+    deepest_values = []
+    for stats_row in competitor_stats_rows:
+        competitor_name = stats_row.get("competitor")
+        avg_discount = _coerce_float(stats_row.get("avg_discount"))
+        deepest_discount = _coerce_float(stats_row.get("deepest_discount"))
+        active_offers = int(stats_row.get("active_offers") or 0)
+        competitor_rows = offers_by_competitor.get(competitor_name, [])
+        breakdown = _promo_type_breakdown(competitor_rows)
+        top_offers = _top_offer_examples(competitor_rows, limit=_example_limit())
+        avg_gap = round((avg_discount or 0) - internal_avg, 2)
+        deepest_gap = round((deepest_discount or 0) - (internal_deepest or 0), 2)
+        competitors.append(
+            {
+                "competitor": competitor_name,
+                "avg_discount": avg_discount,
+                "deepest_discount": deepest_discount,
+                "active_offers": active_offers,
+                "avg_gap_vs_client": avg_gap,
+                "deepest_gap_vs_client": deepest_gap,
+                "promo_type_breakdown": breakdown,
+                "top_offers": top_offers,
+            }
+        )
+        summary_lines.append(
+            f"- {competitor_name}: avg_discount={avg_discount}, deepest_discount={deepest_discount}, "
+            f"active_offers={active_offers}, avg_gap_vs_{CLIENT_BRAND}={avg_gap}, deepest_gap_vs_{CLIENT_BRAND}={deepest_gap}, "
+            f"promo_mix={json.dumps(breakdown, default=str)}"
+        )
+        for offer in top_offers:
+            title = offer.get("offer_title") or "Untitled offer"
+            description = offer.get("description") or "No description"
+            promo_type = offer.get("promo_type") or "other"
+            discount_max = offer.get("discount_max")
+            example_lines.append(
+                f"- {competitor_name}: {title} | {description} | promo_type={promo_type} | discount_max={discount_max}"
+            )
+        if avg_discount is not None:
+            avg_values.append(avg_discount)
+        if deepest_discount is not None:
+            deepest_values.append(deepest_discount)
+
+    common_promo_types = [
+        promo_type
+        for promo_type, count in sorted(
+            aggregate_breakdown.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        if count > 0
+    ][:3]
+    avg_competitor_discount = round(sum(avg_values) / len(avg_values), 2) if avg_values else None
+    deepest_competitor_discount = max(deepest_values) if deepest_values else None
+    explanation = _generate_market_why_explanation(
+        category=category,
+        competitor_summary_text="\n".join(summary_lines),
+        competitor_offer_examples_text="\n".join(example_lines) or "No examples available.",
+        internal_avg=internal_avg,
+        internal_deepest=internal_deepest,
+        internal_active_offer_count=internal_active_offer_count,
+        internal_breakdown=internal_breakdown,
+        internal_top_offers=internal_top_offers,
+        common_promo_types=common_promo_types,
+        avg_competitor_discount=avg_competitor_discount,
+        deepest_competitor_discount=deepest_competitor_discount,
+    )
+
+    result = {
+        "status": "ok",
+        "scope": "all_competitors_in_category",
+        "client_brand": CLIENT_BRAND,
+        "category": category,
+        "competitor_count": len(competitors),
+        "competitors": competitors,
+        "avg_competitor_discount": avg_competitor_discount,
+        "deepest_competitor_discount": deepest_competitor_discount,
+        "common_promo_types": common_promo_types,
+        "internal_avg_discount": internal_avg,
+        "internal_deepest_discount": internal_deepest,
+        "internal_active_offer_count": internal_active_offer_count,
+        "internal_promo_type_breakdown": internal_breakdown,
+        "internal_top_offers": internal_top_offers,
+        "situation_line": explanation.situation,
+        "action_line": explanation.action,
+        "why_line": explanation.why,
+    }
+    payload = _serialize_payload(result)
+    logger.info(
+        "Tool get_competitor_market_recommendation returning | payload=%s",
+        _truncate(payload),
+    )
     return payload

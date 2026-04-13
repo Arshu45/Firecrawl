@@ -35,7 +35,7 @@ class ChatResponse(BaseModel):
 @app.post("/api/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
     """
-    Passes a natural language question to the LangGraph Agent.
+    Passes a natural language question to the Langchain Agent.
     """
     logger.info(
         "Incoming chat request | session_id=%s | message=%r",
@@ -43,7 +43,7 @@ def chat_endpoint(request: ChatRequest):
         request.message,
     )
     try:
-        # Agent execution using LangGraph State mapping
+        # Agent execution using Langchain State mapping
         final_answer = agent_service.generate_response(
             request.message,
             request.session_id,
