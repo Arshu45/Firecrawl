@@ -8,7 +8,7 @@ import os
 import datetime
 from decimal import Decimal
 
-from config.settings import CATEGORY_MAP
+from config.settings import CATEGORY_MAP, CLIENT_BRAND
 
 def load_mapping() -> dict:
     config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'internal_mapping.json')
@@ -20,6 +20,11 @@ def _jsonify(val):
         return val.isoformat()
     if isinstance(val, Decimal):
         return float(val)
+    if isinstance(val, str):
+        stripped = val.strip()
+        if stripped.lower() in {"", "null", "none", "n/a", "na", "-", "--"}:
+            return None
+        return stripped
     return val
 
 def transform_internal_data(raw_rows: list[dict]) -> list[dict]:
@@ -40,7 +45,7 @@ def transform_internal_data(raw_rows: list[dict]) -> list[dict]:
             "scraped_date": scraped_date,
             "source_count": 1,
             "description": None,
-            "brand": None, # Assumed internal brand
+            "brand": CLIENT_BRAND,
         }
         
         # Apply field mappings

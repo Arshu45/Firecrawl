@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS promotions (
     min_purchase  NUMERIC(10,2),
     coupon_code   VARCHAR(100),
     user_type     VARCHAR(20)  DEFAULT 'all',
-    valid_until   VARCHAR(50),
+    valid_until   DATE,
     source_count  INT          DEFAULT 1,
     source_url    TEXT,
     scraped_date  DATE         DEFAULT CURRENT_DATE,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS internal_promotions (
     min_purchase      NUMERIC(10,2),
     coupon_code       VARCHAR(100),
     user_type         VARCHAR(20)  DEFAULT 'all',
-    valid_until       VARCHAR(50),
+    valid_until       DATE,
     source_count      INT          DEFAULT 1,
     source_url        TEXT,
     scraped_date      DATE         DEFAULT CURRENT_DATE,
@@ -66,3 +66,5 @@ CREATE INDEX IF NOT EXISTS idx_promotions_category     ON promotions(category);
 CREATE INDEX IF NOT EXISTS idx_promotions_scraped_date ON promotions(scraped_date);
 CREATE INDEX IF NOT EXISTS idx_promotions_coupon_code  ON promotions(coupon_code);
 CREATE INDEX IF NOT EXISTS idx_promotions_promo_type   ON promotions(promo_type);
+CREATE INDEX IF NOT EXISTS idx_promotions_valid_until  ON promotions(valid_until);
+CREATE INDEX IF NOT EXISTS idx_internal_valid_until    ON internal_promotions(valid_until);
